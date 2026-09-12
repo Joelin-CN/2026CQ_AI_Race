@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# 运行时产物
+logs/
+config.toml
+
+# 官方资料与本地临时区（另行获取，见 README「快速开始」）
+official_source/
+temp/
+
+# IDE / OS
+.idea/
+.vscode/
+.zcode/
+.DS_Store
+Thumbs.db

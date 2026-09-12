@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cqairace"
+version = "0.1.0"
+description = "全国通用人工智能挑战赛（高校组·通用智能体任务挑战赛）参赛智能体：自研大脑层 + 复用官方 arenaagentpro 基础设施"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "arenaagentpro",
+    "loguru",
+    "toml>=0.10.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+# 官方 baseline-agent 以 editable 路径依赖挂载：原样保留、可随时同步上游，
+# 我们的全部改进放在 src/cqairace 下。
+[tool.uv.sources]
+arenaagentpro = { path = "official_source/gitee/baseline-agent", editable = true }
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cqairace"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
