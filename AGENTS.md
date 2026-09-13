@@ -17,16 +17,18 @@
 
 | 路径 | 语义 |
 |---|---|
-| `docs/solution/architecture.md` | 方案唯一权威记录（决策、架构、任务路线、阶段计划） |
+| `docs/solution/architecture.md` | 方案唯一权威记录（决策、架构、评分规则、任务路线、阶段计划） |
 | `src/cqairace/` | 自研智能体代码（规划布局见其目录内 README） |
 | `official_source/gitee/baseline-agent/` | 官方库（gitignore，另行克隆；接口语义以其源码与 docs/ 为准） |
+| `E:\2026\cqAIRace\Windows` | 官方完整比赛系统（gitignore 外部路径）：客户端/赛题系统/PDF 文档，2026.09.12 版，详见架构文档第 8 节 |
 | `temp/` | 本地临时区（gitignore）：赛题系统安装包、下载中间物 |
 | `logs/`（运行时生成） | 运行日志与 prompt/感知图落盘（gitignore） |
 
 ## 工具链
 
-- Python ≥3.12，**uv** 管理（`.python-version` 固定 3.12；tuna 镜像已在
-  pyproject 配置）。常用命令：`uv sync`、`uv run <cmd>`、`uv run pytest`。
+- Python 环境：conda 环境 **`cqairace`**（Python 3.12.14 + uv 0.12.13）。
+  先 `conda activate cqairace` 再执行 uv 命令；`.python-version` 固定 3.12；
+  tuna 镜像已在 pyproject 配置。常用命令：`uv sync`、`uv run <cmd>`、`uv run pytest`。
 - 官方包以 editable 路径依赖挂载（`[tool.uv.sources] arenaagentpro`），
   安装后 `import arenaagent` 直接可用；若未装，入口代码需带 sys.path 兜底。
 - pb2 生成：`uv run python official_source/gitee/baseline-agent/scripts/generate_pb2.py`

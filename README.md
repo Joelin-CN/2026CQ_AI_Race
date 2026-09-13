@@ -24,16 +24,28 @@
 └── pyproject.toml          # uv 项目定义；官方包以 editable 路径依赖挂载
 ```
 
+## 本地环境与官方系统位置
+
+- **Python 环境**：conda 环境 `cqairace`（Python 3.12.14，内含 uv 0.12.13）。
+  ```bash
+  conda activate cqairace     # 而后所有 uv 命令在此环境中执行
+  ```
+- **官方完整比赛系统**：`E:\2026\cqAIRace\Windows`（2026.09.12 版）——
+  客户端（UE，已解压约 53GB）/ 赛题系统（`start_test.bat`）/ 基准 Agent /
+  四份 PDF 文档 / 更新说明。详见
+  [docs/solution/architecture.md](docs/solution/architecture.md) 第 8 节。
+- 启动顺序：①客户端 `run.bat`；②`start_test.bat train --task <task-id>`；
+  Agent 出错必须重启赛题系统，切换任务不需要。
+
 ## 快速开始
 
-前置安装：[uv](https://docs.astral.sh/uv/)（Python ≥3.12 由 uv 自动管理）。
-
 ```bash
-# 1. 克隆官方 baseline（本仓库不含 official_source/）
-git clone https://gitee.com/tongtest_admin/baseline-agent.git \
-    official_source/gitee/baseline-agent
+conda activate cqairace
 
-# 2. 安装依赖（含官方 arenaagentpro 包，editable 挂载；首次较大，含 torch）
+# 1. 官方 baseline 已克隆于 official_source/gitee/baseline-agent（新机器按 README 仓库结构说明重新克隆）
+
+# 2. 让项目 .venv 绑定 conda 解释器，再安装依赖（含官方 arenaagentpro，首次较大，含 torch）
+uv venv --python %CONDA_PREFIX%/python.exe   # PowerShell: uv venv --python $env:CONDA_PREFIX/python.exe
 uv sync
 
 # 3. 生成 gRPC pb2 代码（官方脚本，写入官方包的 arenaagent/generated/）
@@ -48,6 +60,31 @@ uv run arenaagent --agent_name preliminary_baseline_agent \
 官方文档（克隆后位于 `official_source/gitee/baseline-agent/docs/`）：
 `usage_guide.md`（上手指南）、`simulation_interface_guide.md`（感知/动作 API）、
 `vlm_config_table.md`（可选模型与所需环境变量）。
+
+## 模型接入（DeepSeek，2026-09-13 实测）
+
+当前主力模型 **`deepseek-flash`**（DeepSeek 账号下与 `deepseek-v4-pro` 二选一，用 flash）。
+实测结论：支持视觉输入（OpenAI `image_url` 格式）；接口为 OpenAI 兼容
+（`https://api.deepseek.com/v1`），对应官方客户端 `client_type="openai"`；
+推理模型（回复含 `reasoning_content`，不影响基线解析，只读 `content`）；
+小 prompt 约 3 秒/步。
+
+接入用官方"通用环境变量覆盖"方式（零代码改动，覆盖一切配置类）：
+
+```powershell
+# PowerShell，每次会话设置；key 只走环境变量，绝不写入文件/仓库
+$env:VLM_CLIENT_TYPE="openai"
+$env:VLM_CLIENT_CFG_NAME="deepseek-flash"
+$env:VLM_CLIENT_CFG_API_BASE="https://api.deepseek.com/v1"
+$env:VLM_CLIENT_CFG_API_KEY="<DEEPSEEK_API_KEY>"
+```
+
+设置后运行基线（入口类任意，实际生效的是上面的环境变量）：
+
+```bash
+uv run arenaagent --agent_name preliminary_baseline_agent \
+    --config config.toml --vlm_model VLMGPT4o1120Config --run_times 1
+```
 
 ## 关键约定
 

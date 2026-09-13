@@ -23,6 +23,29 @@
 | 晋级公示 / 决赛赛题发布 | 09-25 ~ 10-01 |
 | 决赛与颁奖（含技术答辩） | 10 月下旬 |
 
+### 评分规则与题量（官方《初赛系统使用指南》PDF v1.0 + 2026-09-12 更新说明）
+
+| 任务 | 每轮题量 | 评分方式 |
+|---|---|---|
+| 整理房间 tidyroom | 1 题 | 任务完成度（正确摆放比例）+ 时间效率 |
+| 拼图 jigsaw | 1 题 | 任务完成度（正确放置比例）+ 时间效率 |
+| 分类计数 counting | 10 题 | **纯时间效率**（答对前提下越快越高） |
+| NPC 对话 npc | 5 题 | 纯时间效率 |
+| 瑞文测试 raven | 10 题 | 纯时间效率 |
+
+- 每题限时 **400 秒**：超时自动结算，完成度分保留、时间效率分归零。
+- 初赛总分 = 五任务平均分；**每任务取历史有效提交的最好成绩**（可反复 `test` 刷分）。
+- 提交链路：`start_test.bat test --task <id>` 产出加密 `result_{Task}.bin`（五任务齐全）→
+  `start_test.bat package-results` 打包 `result_package.bin` → 上传官网。
+  `train` 模式产出的明文 `eval_res.json` 仅可调试、不可提交。
+- ⚠️ 版本注意：release 包内《使用指南说明.md》是旧版（"每任务 3 题"），以 PDF 版
+  （1/1/5/10/10 题，与 run_times 说明一致）为准；最终以 train 模式
+  `_get_num_subjects_from_task()` 实测为准。
+- ⚠️ 运维注意：Agent 运行出错后**必须重启赛题系统**，否则结果作废——稳定性 = 分数
+  （counting/raven 需连跑 10 题）。test 模式下赛题在仿真环境中隐藏，无法从客户端偷看。
+- 官方更新（09-05/09-08/09-12）：删除了直接获取仿真环境信息的接口、隐藏可动物体白名单、
+  修复漏题风险；**初赛结束后将在最新系统上复验决赛队代码**，违规会被处理。
+
 ## 2. 官方 baseline 要点（事实，来自源码阅读）
 
 - 纯 Python ≥3.12 + uv，无 ROS。两条 gRPC 链路：
@@ -100,17 +123,68 @@
   重新 pull 即可，这正是 D1 的价值）。
 - **pb2 代码不入官方库**：`arenaagent/generated/` 需手动跑官方
   `scripts/generate_pb2.py` 生成，README「快速开始」已写明。
-- **评分细则在 PDF 手册**（网盘分发，系统下载完成后）：`score_msg.proto`
-  与 `TaskDifficultyMsg` 表明分数含难度系数，具体公式待手册确认。
-- **赛题系统尚未下载完成**：端到端联调 blocked，先用官方文档与协议文件
-  做离线设计；日志回放（`logs/prompts/`）是系统就绪前后的主要调试手段。
+- **评分细则在 PDF 手册**：已获取并入库摘要（见 1.1 评分规则与题量）；
+  时间效率的具体公式（得分-时间曲线）仍是图片形式，精确公式待
+  train 模式 `eval_res.json` 实测反推。
+- **接口已收紧（2026-09-05 后）**：感知仅剩 `acquire_first_person_perception`
+  （组合图 + objects 元数据）与 `has_object_in_hand` 两个接口；
+  《上手指南》PDF 第 8 节接口表中的 `get_object_basic_info` 等单查接口为
+  旧版残留，以 proto 为准。`objects` 元数据保留 → 感知双通道策略仍成立。
+  `move_and_take_puzzle_piece` 已无作用、`movable_object_ids` 已失效。
+- **官方文档版本混乱**：release 内 md 为旧版（3 题/任务），网盘 PDF 为新版；
+  以实测为准。
 
-## 8. 实施路线（阶段划分）
+## 8. 本地系统布局与环境（2026-09-13 记录）
+
+### 官方完整比赛系统位置
+
+**`E:\2026\cqAIRace\Windows`**（网盘下载，2026.09.12 版赛题系统）：
+
+| 路径 | 内容 | 状态 |
+|---|---|---|
+| `客户端\Windows\Windows\` | UE 仿真客户端（TongTestUE5.exe，run.bat 启动） | 已解压（约 53GB） |
+| `赛题系统\2026.09.12\release\release\` | 赛题系统：`start_test.bat` → `arena_offline.exe`（任务系统 :50051）+ `tongsim_server\`（TongSim 代理 :50060 → UE :50052/:5056） | 已解压 |
+| `基准Agent\baseline-agent.zip` | 官方 baseline 打包 | 与 gitee 克隆功能一致（已逐文件核对，见下） |
+| `文档\` | 四份 PDF：初赛系统使用指南 / ArenaAgentPro 上手指南 / Agent 模型配置表 / 新增自定义 Agent 配置 | 已通读，摘要见本文档 |
+| `更新说明.txt` | 09-05 / 09-08 / 09-12 三次更新记录（接口收紧、白名单隐藏、反漏题） | 已读 |
+
+版本核对结论（2026-09-13）：`baseline-agent.zip` 与 `official_source/gitee/baseline-agent`
+文件清单完全一致；唯一实质差异是 `tongsim_interface.py` 的 docstring 详略（gitee 版更全、
+更新）。**`official_source` 无需更换，继续以 gitee pull 方式跟进官方更新。**
+
+启动顺序：①双击客户端 `run.bat`；②`start_test.bat train --task <task-id>`（调试）
+或 `test`（正式）；③切换任务时客户端不用重启，Agent 出错则必须重启赛题系统（Ctrl+C）。
+
+### Python 环境
+
+- conda 环境 **`cqairace`**（`E:\Softwares\Anaconda\envs\cqairace`）：
+  Python 3.12.14 + uv 0.12.13（pip 经清华镜像安装于环境内）。
+- 用法：`conda activate cqairace` 后在仓库根目录执行 `uv sync` 等命令；
+  首次 `uv sync` 前先 `uv venv --python %CONDA_PREFIX%\python.exe` 让项目
+  `.venv` 绑定 conda 解释器（避免 uv 另行下载托管 Python）。
+
+### 模型接入（2026-09-13 实测）
+
+- 主力模型：**`deepseek-flash`**（DeepSeek，OpenAI 兼容接口
+  `https://api.deepseek.com/v1`，同账号另有 `deepseek-v4-pro` 备用）。
+- 实测：支持视觉输入（OpenAI `image_url` base64 格式）；能按要求在 `content`
+  返回单动作 JSON 数组；为推理模型（`reasoning_content` 与正文分离，基线只读
+  正文，兼容）；小 prompt 约 3s/步。
+- 接入方式：官方"通用环境变量覆盖"（`VLM_CLIENT_TYPE=openai` +
+  `VLM_CLIENT_CFG_NAME/API_BASE/API_KEY`），零代码改动，模板见根 README
+  「模型接入」一节。key 只走环境变量，不入库。
+- 影响：延迟对 counting/raven 无影响（确定性路线不调模型）；npc（时间分）
+  与 tidyroom/jigsaw（VLM 路线）每步多约 3~8s，后续可测 `deepseek-v4-pro`
+  或多模型路由对比。
+
+## 9. 实施路线（阶段划分）
+
+> 执行层细化（按天排布、决策门、每日检查清单、命令速查）见 [roadmap.md](roadmap.md)。
 
 | 阶段 | 内容 | 退出标准 |
 |---|---|---|
 | P0 ✅ | 仓库骨架 + 本设计文档 + git/GitHub | 本文档合入 main |
-| P1 | 系统下载完成后：跑通官方 `preliminary_baseline_agent` 采基线 | 五任务各产出一份日志 + 结果文件 |
+| P1 | 跑通官方 `preliminary_baseline_agent` 采基线（train 模式；实测各任务题量与评分曲线） | 五任务各产出一份日志 + eval_res.json 基线成绩 |
 | P2 | 落地 `main.py`/`agent.py`/`routing.py` 最小闭环（行为=官方基线） | 我们的 runner 跑通五任务，成绩≥基线 |
 | P3 | counting + raven 确定性技能 | 对应任务得分显著超 VLM 直跑 |
 | P4 | npc 对话强化 + tidyroom / jigsaw 混合策略 | 初赛五任务总分达标，提交 |
