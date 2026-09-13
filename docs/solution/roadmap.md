@@ -155,11 +155,24 @@
 **证据归档**：`temp/baseline_records/{counting,npc,raven,jigsaw}/`（eval json + 运行日志 + raven 题图）。
 **基线总分：(16.0+53.14+88.61+0.0+27.2)/5 ≈ 37.0**。
 
+### 2026-09-13 深夜：P1.5 保底提交完成
+
+- test 模式五任务全部跑完，五个 result_*.bin 齐全，`package-results` 打包成功：
+  `E:\2026\cqAIRace\Windows\赛题系统\2026.09.12\release\release\arena_offline\result_package.bin`
+- 备份：`temp/baseline_records/submission_20260913/`（含 package + 五个 bin）
+- 待办：用户上传官网 nagic.bigai.ai（需账号登录）
+- 注意：test 选题随机，成绩以上传后官网显示为准；raven 本轮异常地快（10 题≈10 分钟，
+  train 时≈55 分钟），原因待查（可能提前判错结束）
+- 运维经验：package-results 的 `--package-results-dir` 以 arena_offline 为基准，
+  bins 在其中时参数用 `.`；切换任务只需杀 arena_offline/tongsim_server 进程，
+  客户端可一直挂着（无角色接入时客户端显示空白天空盒属正常待机态）
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
 |---|---|---|---|---|
 | 2026-09-13 | 全部 | 建立基线（无改动，官方 agent + DeepSeek-flash） | temp/baseline_records/ | 见上表 |
+| 2026-09-13 | 全部 | test 模式保底提交打包 | temp/baseline_records/submission_20260913/ | 待官网显示 |
 
 ## 附录：命令速查
 
