@@ -167,12 +167,25 @@
   bins 在其中时参数用 `.`；切换任务只需杀 arena_offline/tongsim_server 进程，
   客户端可一直挂着（无角色接入时客户端显示空白天空盒属正常待机态）
 
+### 2026-09-14 凌晨：官网拒收旧构建 → 换补丁版重跑重打包
+
+- 上传被拒："答题文件校验未通过"——网盘 09.12 版被**静默补丁**（release.zip MD5
+  1876f072→cca6cde4，仅 3 文件变更：arena_offline.exe / arena_resources.pack /
+  tongsim_server.exe，对应公告"更新了赛题题库"；UE 客户端无需更新）
+- 新版解压于 `E:\...\赛题系统\2026.09.12\release_v2\`，五任务 test 全部重跑完成，
+  重新打包：`release_v2\release\arena_offline\result_package.bin`（备份
+  `temp/baseline_records/submission_20260914_v2/`）
+- 经验：结果文件的 V4 构建戳新旧相同，官网校验的是**题库版本**（结果内容里的
+  题目标识），所以必须用新题库系统重跑，无法只换打包工具
+- 待用户上传验证
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
 |---|---|---|---|---|
 | 2026-09-13 | 全部 | 建立基线（无改动，官方 agent + DeepSeek-flash） | temp/baseline_records/ | 见上表 |
-| 2026-09-13 | 全部 | test 模式保底提交打包 | temp/baseline_records/submission_20260913/ | 待官网显示 |
+| 2026-09-13 | 全部 | test 模式保底提交打包（旧构建，被官网拒收） | temp/baseline_records/submission_20260913/ | 被拒 |
+| 2026-09-14 | 全部 | 补丁版（新题库）重跑五任务 + 重新打包 | temp/baseline_records/submission_20260914_v2/ | 待上传 |
 
 ## 附录：命令速查
 
