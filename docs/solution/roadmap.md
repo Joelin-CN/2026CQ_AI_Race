@@ -210,6 +210,31 @@ VLM 循环，run_step 直接：物化题图 → ResNet 全量排序 → 首选�
 `temp/baseline_records/submission_20260914_am/`）。**raven 任务分预期从 0 → ~99**，
 预估总分 ~37 → **~52**。待中午 12:00 官网校验生效后上传。
 
+### 2026-09-14 晚：P4-tidyroom 首版落地——train 32 分（基线 16 翻倍）
+
+**架构（三阶段，VLM 只出现一次）**：360° 扫描建图（4 帧 / 52 物体，~15s）→
+VLM 4 帧并行分类（物品→容器映射，~60-115s）→ 零 VLM 脚本执行
+（`move_and_take_object`+`move_and_put_down`，失败秒拒即拉黑）。
+实现：`src/cqairace/tidyroom_agent.py`；编排：`temp/run_tidyroom.sh`。
+
+**train 实测（run2，21:03）**：5 件归位（垃圾→桶、杯×3+食物→茶几）、
+4 双鞋 not pickup 秒拒拉黑（0.0s/件）、234s 主动 finish → **32.0 分**
+（基线 16.0）。时间分首次拿到（基线超时归零）。
+
+**本轮修掉的坑（下轮直接受益）**：
+1. deepseek-flash 大 prompt（30+ 物体元数据+图）单次推理 68s——串行 4 帧必超时；
+   改 4 帧并行（总耗时≈最慢单次）+ 单次超时 75s；
+2. VLM 实际输出 `{"items":{"trash":["36"]}}`（类别→ID 列表）而非要求的
+   ID→类别——解析器已兼容两种格式；
+3. "not pickup" 是服务端本地判断（不走导航、0.0s 返回）→ 拉黑零成本，
+   物品尺寸上限从 60cm 放宽到 80cm（让抱枕类入队，失败免费）；
+4. train 每轮**随机场景布局**（与基线物体 ID 完全不同）——运行时识别
+   策略验证有效，零硬编码可行。
+
+**中断事件**：run3-5 感知退化到 3 物体，全栈重启无效；截图定位为
+**前台全屏游戏占用 GPU**（UE 渲染线程被抢占），21:15 后暂停验证。
+待恢复后：多轮 train 验证 80cm 上限收益 + 完成度分母精算 + test 重跑换 bin。
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
@@ -220,6 +245,7 @@ VLM 循环，run_step 直接：物化题图 → ResNet 全量排序 → 首选�
 | 2026-09-14 | raven | 自研秒答 agent（ResNet 首选直接提交）重跑 test | temp/baseline_records/submission_20260914_am/ + temp/p2_raven/trace.jsonl | train 13/13 对（97~99.7）；test 待官网验证 |
 | 2026-09-14 | counting | 自研 counting agent（扫描+VLM分类+聚类去重+重试轮换） | temp/p2_counting/trace.jsonl + task log | **train 10/10 对，均分 66.23**（基线 53.14） |
 | 2026-09-14 | counting | test 模式重跑（10/10 首答提交，零重试满速）+ 换 bin 重打包 | temp/baseline_records/submission_20260914_pm/ | 待官网验证（预估 70±） |
+| 2026-09-14 | tidyroom | 自研三阶段 agent（扫描+VLM 并行分类+零 VLM 执行，拉黑机制） | temp/baseline_records/tidyroom/ + temp/p4_tidyroom/trace.jsonl | **train 32.0**（基线 16.0）；test 待跑 |
 
 **事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator
 中断、UE 客户端死亡；数据零损失（仓库在 GitHub、归档随盘恢复），重启 UE 后干净重跑成功。

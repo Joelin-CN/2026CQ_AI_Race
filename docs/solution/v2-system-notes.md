@@ -67,5 +67,27 @@
 |---|---|
 | `temp/p2_raven/collected/` | 16 张唯一题图（彩色原图）+ 裁剪子图目录 |
 | `temp/p2_raven/trace.jsonl` | 全部提交轨迹（题图哈希/名次/答案） |
+| `temp/p2_counting/trace.jsonl` | counting 提交轨迹 |
+| `temp/p4_tidyroom/trace.jsonl` | tidyroom 每件 take/put 轨迹 |
 | `temp/baseline_records/` | 各任务 eval 归档 + 运行日志 + 历次提交包 |
 | `temp/pdf_images/` | 官方 PDF 中提取的评分公式图 |
+
+## 7. tidyroom 实测语义（2026-09-14，自研 agent train 实跑）
+
+1. **"can not take this object for not pickup" 是服务端本地判断**：
+   不触发导航、0.0s 返回——对不可抓物体（人脚上的鞋等）失败重试的代价
+   几乎为零，"失败即拉黑"策略零成本；据此把物品候选尺寸上限放宽到 80cm
+   （大件失败免费，成功一件赚 4 分）。
+2. **train 每轮随机场景布局**：与基线同 task 的物体 object_id/位置完全
+   不同——任何按 ID/坐标硬编码的策略在 test 必挂，运行时识别是唯一路径。
+3. **评分线性可加**：5 件归位 + 234s 主动 finish = 32.0 分（基线 4 件超时
+   16.0）。粗算 1 件≈4 分（0.8×5%），时间分≈0.2×剩余时间比；完成度
+   分母精确值待多样本回归。
+4. **deepseek-flash 视觉大 prompt（30+ 物体元数据+复合图）单次推理
+   ~68s**：串行多帧分类必超时；解法是帧级并行（总耗时≈最慢单次）。
+   模型还不守输出格式约定（返回 类别→ID列表 而非 ID→类别），解析器
+   必须两种都兼容。
+5. **UE 客户端被前台全屏程序（游戏）占用时感知退化**：可见物体从 52
+   跌到 3，spawn 返回空 ID；重启 tongsim/arena 均无效，必须释放前台
+   GPU 占用。跑验证前确认机器没人在用（本条是 2026-09-14 run3-5 三轮
+   白跑的教训）。

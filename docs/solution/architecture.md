@@ -124,7 +124,7 @@
 | counting 分类计数 | 确定性聚合：转身 360° 扫描 + `objects` 按 object_id/世界坐标去重 + 颜色/形状统计 | objects 元数据 | 规划 |
 | raven 瑞文测试 | **已破局（2026-09-14）**：官方 ResNet 首选 + 直接提交，v2 题库 train 实测 13/13 对（97~99.7 分）。实现见 `src/cqairace/raven_proto.py`；旧系统 0 分系 v1 判卷/题库缺陷 | 一题一提交/一题一连接的 v2 语义 | ✅ 验证通过 |
 | npc 对话 | 强 LLM 多轮对话收集线索，`submit_answer` 提交 | `speak_to_npc` 返回 `npc_reply`+`hints` 注入下一轮 prompt（官方已有） | 规划 |
-| tidyroom 整理房间 | 规则化空间规划（`place_location`/`world_aabb`/高度约束）+ VLM 语义分类"什么放哪" | 官方 task_prompt 提示按包围盒与放置高度规划 | 规划 |
+| tidyroom 整理房间 | **已落地初版（2026-09-14，train 32 分 = 基线翻倍）**：三阶段——360° 扫描建图 → VLM 一次性并行分类（物品→容器映射，规则兜底）→ 零 VLM 元数据执行（`world_aabb` 中心+顶高放置、not pickup 秒拒拉黑、30s 看门狗 finish）。实现 `src/cqairace/tidyroom_agent.py`；待多轮 train 调优 + test | `objects` 元数据 + 官方"按包围盒放置"提示 | ✅ 首版验证（32/100） |
 | jigsaw 拼图 | 分割图形状匹配做确定性放置 + VLM 兜底 | 官方提示：拼图块 X=837、观察点 (750,191)，场景固定 | 规划 |
 | （决赛）长程串联 | 任务分解 planner + 全局记忆 + 阶段状态机 | 复用上述五技能 | 预留 |
 
