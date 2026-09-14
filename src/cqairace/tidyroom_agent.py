@@ -130,6 +130,8 @@ class TidyroomAgent(VLMAgent):
         self._container_slots: dict[str, int] = {}
         self._queue: list[dict] = []               # 待办队列
         self._vlm_futs: list[Future] = []          # 在途 VLM 帧分类
+        self._item_votes: dict[str, Counter] = {}  # VLM 多帧投票（跨收割累积）
+        self._rule_cats: set[str] = set()          # 规则已分且高置信的物体
         self._vlm_started = 0.0
         self._scan_round = 0
         self._done_oids: set[str] = set()          # 已处理（成功/放弃/拉黑）
@@ -360,6 +362,13 @@ class TidyroomAgent(VLMAgent):
                     continue
                 if self._world.get(oid) is None:
                     continue
+                self._item_votes.setdefault(oid, Counter())[cat] += 1
+                # 校准结论（2026-09-14 压测）：flash 单帧准确率 87.5%，
+                # 错分靠多帧投票压制；规则对 cylinder/round/irregular/
+                # boot 等特征已证明可靠——VLM 单票不得推翻规则，
+                # ≥2 票才允许覆盖（防"单帧错分→容器放错"）。
+                if oid in self._rule_cats and self._item_votes[oid][cat] < 2:
+                    continue
                 if self._categories.get(oid) != cat:
                     self._categories[oid] = cat
                     changed = True
@@ -386,6 +395,7 @@ class TidyroomAgent(VLMAgent):
             cat = self._rule_category(oid)
             if cat:
                 self._categories[oid] = cat
+                self._rule_cats.add(oid)
         self._resolve_containers()
 
     def _rule_category(self, oid: str) -> str | None:
