@@ -219,6 +219,11 @@ VLM 循环，run_step 直接：物化题图 → ResNet 全量排序 → 首选�
 | 2026-09-14 | 全部 | 补丁版（新题库）重跑五任务 + 重新打包 | temp/baseline_records/submission_20260914_v2/ | 待上传 |
 | 2026-09-14 | raven | 自研秒答 agent（ResNet 首选直接提交）重跑 test | temp/baseline_records/submission_20260914_am/ + temp/p2_raven/trace.jsonl | train 13/13 对（97~99.7）；test 待官网验证 |
 | 2026-09-14 | counting | 自研 counting agent（扫描+VLM分类+聚类去重+重试轮换） | temp/p2_counting/trace.jsonl + task log | **train 10/10 对，均分 66.23**（基线 53.14） |
+| 2026-09-14 | counting | test 模式重跑（10/10 首答提交，零重试满速）+ 换 bin 重打包 | temp/baseline_records/submission_20260914_pm/ | 待官网验证（预估 70±） |
+
+**事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator
+中断、UE 客户端死亡；数据零损失（仓库在 GitHub、归档随盘恢复），重启 UE 后干净重跑成功。
+教训：跑 test 时别动 USB 口；编排脚本已具备断点重跑能力。
 
 **counting 关键工程结论**（写代码必读）：agent 答完必须保持连接轮询 session 至终态再断开，
 否则服务端判卷不落盘；答错可重试（间隔≥4s），重试轮换选项是正确率兜底的核心机制；
