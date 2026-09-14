@@ -218,6 +218,11 @@ VLM 循环，run_step 直接：物化题图 → ResNet 全量排序 → 首选�
 | 2026-09-13 | 全部 | test 模式保底提交打包（旧构建，被官网拒收） | temp/baseline_records/submission_20260913/ | 被拒 |
 | 2026-09-14 | 全部 | 补丁版（新题库）重跑五任务 + 重新打包 | temp/baseline_records/submission_20260914_v2/ | 待上传 |
 | 2026-09-14 | raven | 自研秒答 agent（ResNet 首选直接提交）重跑 test | temp/baseline_records/submission_20260914_am/ + temp/p2_raven/trace.jsonl | train 13/13 对（97~99.7）；test 待官网验证 |
+| 2026-09-14 | counting | 自研 counting agent（扫描+VLM分类+聚类去重+重试轮换） | temp/p2_counting/trace.jsonl + task log | **train 10/10 对，均分 66.23**（基线 53.14） |
+
+**counting 关键工程结论**（写代码必读）：agent 答完必须保持连接轮询 session 至终态再断开，
+否则服务端判卷不落盘；答错可重试（间隔≥4s），重试轮换选项是正确率兜底的核心机制；
+首答命中 85-94 分、重试救回 37-74 分。
 
 ## 附录：命令速查
 
