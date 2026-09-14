@@ -55,6 +55,10 @@ _DRY_RUN = os.environ.get("TIDYROOM_DRY_RUN", "") not in ("", "0", "false")
 _ONLY_OIDS = {s for s in os.environ.get("TIDYROOM_ONLY_OID", "").split(",") if s}
 # 导览模式：扫描后逐件走到物品面前停留（人工在 UE 里核对物品位置/类型）
 _TOUR = os.environ.get("TIDYROOM_TOUR", "") not in ("", "0", "false")
+# 侦察点 "x,y"：导览/扫描前先走到该点 4×90° 感知存图（核对家具布局用）
+_SCOUT = os.environ.get("TIDYROOM_SCOUT", "")
+# 鞋枚举实验：对鞋类物体穷举全部交互接口（能否拿起/放进鞋柜）
+_ENUM_SHOE = os.environ.get("TIDYROOM_ENUM_SHOE", "") not in ("", "0", "false")
 
 # VLM 输出词表归一
 _ITEM_ALIASES = {
@@ -149,7 +153,104 @@ class TidyroomAgent(VLMAgent):
     # 导览模式：走到每件物品面前供人工核对
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # 鞋枚举实验：穷举小人-鞋的全部交互接口
+    # ------------------------------------------------------------------ #
+
+    def _obj_loc_now(self, oid: str):
+        # 感知前先走近目标，避免因视野外查不到
+        self._call_with_timeout(self.tongsim.move_to_object, self.character_id,
+                                oid, default=None)
+        p = self._call_with_timeout(
+            self.tongsim.acquire_first_person_perception, self.character_id,
+            1280, 720, default={})
+        for o in p.get("objects", []) or []:
+            if str(o.get("object_id", "")) == oid:
+                return o.get("place_location")
+        return None
+
+    def _enum_shoe(self) -> None:
+        self._scan_rounds(max_rounds=1, submit_vlm=False)
+        shoes = [(oid, o) for oid, o in self._world.items()
+                 if str(o.get("shape", "")).lower() in ("boot", "shoe")]
+        if not shoes:
+            logger.info("ENUM: 场景无鞋类物体")
+            return
+        # 白鞋优先（官方提示"分辨人穿的鞋子"：红靴疑似人穿的干扰项，
+        # 白鞋疑似散落可抓——2026-09-15 用户点破只枚举过 47 红靴的盲区）
+        shoes.sort(key=lambda kv: (0 if str(kv[1].get("shape", "")).lower() == "shoe" else 1,
+                                   float((kv[1].get("place_location") or {}).get("X", 0))))
+        for oid, o in shoes:
+            loc = o.get("place_location") or {}
+            logger.info("ENUM: 目标鞋 {} shape={} color={} @ ({},{},{})",
+                        oid, o.get("shape"), o.get("color"),
+                        loc.get("X"), loc.get("Y"), loc.get("Z"))
+            r = self._call_with_timeout(
+                self.tongsim.move_and_take_object, self.character_id, oid,
+                which_hand=0, default={"result": "timeout"})
+            logger.info("ENUM take({}) -> {}", oid, r)
+            time.sleep(1)
+            in_hand, _ = self._call_with_timeout(
+                self.tongsim.has_object_in_hand, self.character_id, default=(False, None))
+            if in_hand:
+                logger.info("ENUM {} 抓取成功！尝试入鞋柜", oid)
+                self._enum_place_held(oid)
+                return
+        logger.info("ENUM: 全部 {} 只鞋均不可抓", len(shoes))
+
+    def _enum_place_held(self, shoe_oid: str) -> None:
+        """枚举中意外抓到了鞋：直接尝试放进鞋柜。"""
+        cont = self._rule_container("shoe_cabinet")
+        if cont is None:
+            logger.info("ENUM: 未识别鞋柜，放下收尾")
+            self._call_with_timeout(self.tongsim.put_down_sth, self.character_id,
+                                    target_location={"X": 0, "Y": 0, "Z": 100},
+                                    auto_rotate=True, default={})
+            return
+        self._call_with_timeout(self.tongsim.move_to_object, self.character_id,
+                                str(cont.get("object_id", "")), default=None)
+        bb = cont.get("world_aabb") or {}
+        mn, mx = bb.get("min") or {}, bb.get("max") or {}
+        point = {"X": round((mn.get("x", 0) + mx.get("x", 0)) / 2, 1),
+                 "Y": round((mn.get("y", 0) + mx.get("y", 0)) / 2, 1),
+                 "Z": round(mn.get("z", 0) + 0.5 * (mx.get("z", 0) - mn.get("z", 0)), 1)}
+        r = self._call_with_timeout(self.tongsim.put_down_sth, self.character_id,
+                                    target_location=point, auto_rotate=True,
+                                    force_locate=True, default={})
+        logger.info("ENUM 鞋入柜 put_down_sth({}) -> {}", point, r)
+
     def _tour(self) -> None:
+        if _SCOUT:
+            import base64
+            sx_, sy_ = (float(v) for v in _SCOUT.split(","))
+            self._call_with_timeout(self.tongsim.move_to_location, self.character_id,
+                                    {"X": sx_, "Y": sy_, "Z": 0}, default=None)
+            time.sleep(1)
+            for i in range(4):
+                p = self._call_with_timeout(
+                    self.tongsim.acquire_first_person_perception, self.character_id,
+                    1280, 720, default={})
+                if p.get("image"):
+                    TRACE_DIR.mkdir(parents=True, exist_ok=True)
+                    (TRACE_DIR / f"scout_{i}.jpg").write_bytes(
+                        base64.b64decode(p["image"]))
+                for o in p.get("objects", []) or []:
+                    oid = str(o.get("object_id", ""))
+                    bb = o.get("world_aabb") or {}
+                    mn, mx = bb.get("min") or {}, bb.get("max") or {}
+                    try:
+                        d = (abs(mx["x"]-mn["x"]), abs(mx["y"]-mn["y"]), abs(mx["z"]-mn["z"]))
+                        loc = o.get("place_location") or {}
+                    except Exception:
+                        continue
+                    if max(d) >= 60:
+                        logger.info("SCOUT {} {} {} @ ({:.0f},{:.0f},{:.0f}) {:.0f}x{:.0f}x{:.0f}",
+                                    oid, o.get("color"), o.get("shape"),
+                                    loc.get("X", 0), loc.get("Y", 0), loc.get("Z", 0), *d)
+                if i < 3:
+                    self._call_with_timeout(self.tongsim.turn_in_degree,
+                                            self.character_id, 90, default=None)
+                    time.sleep(0.5)
         self._scan_rounds(max_rounds=1, submit_vlm=False)
         self._apply_rule_categories()
         self._rebuild_queue()
@@ -170,7 +271,9 @@ class TidyroomAgent(VLMAgent):
         if self._t0 is None:
             self._t0 = time.time()
         try:
-            if _TOUR:
+            if _ENUM_SHOE:
+                self._enum_shoe()
+            elif _TOUR:
                 self._tour()
             elif _DRY_RUN:
                 logger.info("DRY RUN：仅统计感知，不搬运")
