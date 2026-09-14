@@ -80,6 +80,18 @@ class CountingAgent(VLMAgent):
         key = self.action_space.get("key") or "action"
         logger.info("counting 题目: {}", question)
 
+        # 同题重提交（答错可继续）：复用扫描缓存，按距离顺序换选项，间隔 4s
+        qidx = self._q_state.get(question)
+        if qidx is not None and qidx["order"]:
+            time.sleep(4.0)
+            tried = qidx["tried"]
+            nxt = next((o for o in qidx["order"] if o not in tried), None)
+            if nxt is not None:
+                tried.add(nxt)
+                logger.info("counting 重提交: 尝试 {} (已试: {})", nxt, sorted(tried))
+                return {key: nxt}
+            return {key: qidx["order"][-1]}  # 全试完，重复最后一个
+
         # 1) 解析目标类别
         category, color_filter, shape_filter = self._parse_target(question)
 
@@ -119,19 +131,21 @@ class CountingAgent(VLMAgent):
         count = len(matched)
         # 4) 跨帧聚类去重（同色同形 20cm 半径贪心合并，防坐标漂移分裂/重复计数）
         count = self._cluster_count(matched)
-        # 4) 生成选项顺序：精确匹配优先，其余按 |选项值-计数| 升序；一题一提交
+        # 5) 生成选项顺序：精确匹配优先，其余按 |选项值-计数| 升序
         order = self._option_order(options, count)
         chosen = order[0] if order else "A"
         logger.info("counting 聚合: 目标={} 帧命中={} 计数={} 选项序={} -> 提交 {}",
                     category or color_filter or shape_filter, per_frame_ids, count, order, chosen)
 
+        self._q_state[question] = {"order": order, "tried": {chosen}}
         self._trace(question, category, color_filter, shape_filter, per_frame_ids, count, options, chosen)
         return {key: str(chosen)}
 
     # ------------------------------------------------------------------ #
 
     def _parse_target(self, question: str) -> tuple[str | None, str | None, str | None]:
-        """返回 (语义类别, 颜色过滤, 形状过滤)。"""
+        """返回 (语义类别, 颜色过滤, 形状过滤)。兼容两种问法：
+        「一共有多少个苹果在房间中」「请数一数房间中的苹果数量」。"""
         color_filter = None
         for cn, en in _COLOR_WORDS.items():
             if cn in question:
@@ -142,12 +156,18 @@ class CountingAgent(VLMAgent):
             if cn in question:
                 shape_filter = en
                 break
+        category = None
         m = re.search(r"多少[个只条块](.+?)(?:在|存|有|$)", question)
-        category = m.group(1).strip() if m else None
+        if not m:
+            m = re.search(r"数一数(?:房间|屋)中的(.+?)数量", question)
+        if not m:
+            m = re.search(r"(?:找出|找到).{0,4}所有(?:的)?(.+?)的数量", question)
+        if m:
+            category = m.group(1).strip()
         if category:
             for cn in list(_COLOR_WORDS) + list(_SHAPE_WORDS):
                 category = category.replace(cn, "")
-            category = category.strip("的 ") or None
+            category = category.strip("的 ？?，,。.!！") or None
         return category, color_filter, shape_filter
 
     def _match_frame(self, category, color_filter, shape_filter, frame) -> set[str]:
