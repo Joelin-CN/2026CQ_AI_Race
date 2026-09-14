@@ -86,6 +86,16 @@ uv run arenaagent --agent_name preliminary_baseline_agent \
     --config config.toml --vlm_model VLMGPT4o1120Config --run_times 1
 ```
 
+## 当前最优成绩与复现（2026-09-14）
+
+| 任务 | 基线(train) | 当前方案 | 状态 |
+|---|---|---|---|
+| raven | 0.0 | **官方 ResNet 首选秒答**（`uv run python -m cqairace.raven_proto --run_times 10`），train 13/13 对、97~99.7 分 | ✅ 已入提交包 |
+| 其余四任务 | 16.0 / 53.14 / 88.61 / 27.2 | 官方基线 + DeepSeek-flash | 待优化（P2~P4） |
+
+加强版提交包：`E:\2026\cqAIRace\Windows\赛题系统\2026.09.12\release_v2\release\arena_offline\result_package.bin`
+（备份 `temp/baseline_records/submission_20260914_am/`）。预估总分 ~52。
+
 ## 关键约定
 
 - **不修改 `official_source/` 内任何文件**：官方代码只 import 复用，

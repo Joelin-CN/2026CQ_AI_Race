@@ -37,11 +37,15 @@
 ## 官方接口速查（详见官方 docs/simulation_interface_guide.md）
 
 - 任务系统 gRPC `127.0.0.1:50051`；TongSim 仿真 gRPC `127.0.0.1:50060`。
+- **v2 系统语义（实测，务必遵守）**：问答题一题**一提交**（无重试）、一题**一连接**
+  （答完即断开，靠 run_times 循环领下一题）；答对才在 eval 归档揭示正确答案。
+  详见 [docs/solution/v2-system-notes.md](docs/solution/v2-system-notes.md)。
 - 感知：`acquire_first_person_perception` → `{image: base64 复合图(左RGB/右带编号分割), objects: [{object_id, color, shape, place_location, world_aabb}]}`；
   `object_id` 与分割图编号一致。
 - 决策输出：单动作 JSON 数组 `[{"think", "action", "parameters", "output"}]`，
   问答题 `submit_answer`，行为题 `finish_task` 收尾。
 - NPC 对话固定角色：江淑艳 / 刘伟东 / 赵爷爷 / 张奶奶。
+- 已验证的生产级路径：raven 用 `cqairace.raven_proto`（ResNet 首选秒答，13/13 对）。
 
 ## 写作约定
 
