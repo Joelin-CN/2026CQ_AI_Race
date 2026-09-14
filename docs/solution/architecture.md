@@ -180,7 +180,9 @@
 ### 模型接入（2026-09-13 实测）
 
 - 主力模型：**`deepseek-flash`**（DeepSeek，OpenAI 兼容接口
-  `https://api.deepseek.com/v1`，同账号另有 `deepseek-v4-pro` 备用）。
+  `https://api.deepseek.com/v1`；同账号的 `deepseek-v4-pro` 已实测出局、
+  全线禁用——2026-09-14 tidyroom 视觉分类压测：233~298s/次（flash 为
+  43~71s）、单帧准确率更低，见 roadmap §6）。
 - 实测：支持视觉输入（OpenAI `image_url` base64 格式）；能按要求在 `content`
   返回单动作 JSON 数组；为推理模型（`reasoning_content` 与正文分离，基线只读
   正文，兼容）；小 prompt 约 3s/步。
@@ -188,8 +190,9 @@
   `VLM_CLIENT_CFG_NAME/API_BASE/API_KEY`），零代码改动，模板见根 README
   「模型接入」一节。key 只走环境变量，不入库。
 - 影响：延迟对 counting/raven 无影响（确定性路线不调模型）；npc（时间分）
-  与 tidyroom/jigsaw（VLM 路线）每步多约 3~8s，后续可测 `deepseek-v4-pro`
-  或多模型路由对比。
+  与 tidyroom/jigsaw（VLM 路线）每步多约 3~8s；`deepseek-v4-pro` 已测
+  出局（2026-09-14 压测：慢 4 倍且更不准，全线禁用），flash 的单帧错分
+  靠多帧投票压制（tidyroom 已落地）。
 
 ## 9. 实施路线（阶段划分）
 

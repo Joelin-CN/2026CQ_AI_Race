@@ -63,7 +63,7 @@ uv run arenaagent --agent_name preliminary_baseline_agent \
 
 ## 模型接入（DeepSeek，2026-09-13 实测）
 
-当前主力模型 **`deepseek-flash`**（DeepSeek 账号下与 `deepseek-v4-pro` 二选一，用 flash）。
+当前主力模型 **`deepseek-flash`**（DeepSeek；同账号的 `deepseek-v4-pro` 已实测出局：视觉任务 233~298s/次且准确率更低，全线禁用，2026-09-14 压测）。
 实测结论：支持视觉输入（OpenAI `image_url` 格式）；接口为 OpenAI 兼容
 （`https://api.deepseek.com/v1`），对应官方客户端 `client_type="openai"`；
 推理模型（回复含 `reasoning_content`，不影响基线解析，只读 `content`）；
