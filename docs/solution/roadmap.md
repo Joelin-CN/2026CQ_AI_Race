@@ -259,6 +259,19 @@ log 只能看到成败，物理过程必须看画面。
 待办：多轮 train 验证稳定性（total 分母精算）→ test 重跑换 bin →
 探索鞋类是否可收（4 双鞋 not pickup 是否场景干扰项）。
 
+### 2026-09-15 凌晨：人工导览校准——颈枕修正，train 80.88 分（反超大部队 79）
+
+**方法**：新增 `TIDYROOM_TOUR=1` 导览模式（扫描后逐件走到物品面前停留 4s），
+人工在 UE 里逐件核对——**实机观察再次成为破局关键**：
+- 33 号 45×16cm 黑色圆柱实为**颈枕**（圆柱形抱枕），规则 cylinder→cup 与
+  VLM（压测 3/4 票 cup）双双误判，run12/13 一直塞进茶几丢分；
+- 32/34 是饮料易拉罐（drink 类），判 cup 入桌实测计分（drink 桌合法）；
+- 鞋按"只"建模（一双=2 个 object_id），4 只=2 双，均为 not pickup 干扰项。
+
+**修正**：规则加尺寸判据（细长圆柱 ≥35cm → pillow）；VLM prompt 补颈枕提示。
+**A/B 验证**：同静态题 33 改道沙发 → **48 → 80.88（+32.88）**，
+5/5 全部进对容器（垃圾→桶、罐×2+苹果→桌、颈枕→沙发）。
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
@@ -271,6 +284,7 @@ log 只能看到成败，物理过程必须看画面。
 | 2026-09-14 | counting | test 模式重跑（10/10 首答提交，零重试满速）+ 换 bin 重打包 | temp/baseline_records/submission_20260914_pm/ | 待官网验证（预估 70±） |
 | 2026-09-14 | tidyroom | 自研三阶段 agent（扫描+VLM 并行分类+零 VLM 执行，拉黑机制） | temp/baseline_records/tidyroom/ + temp/p4_tidyroom/trace.jsonl | **train 32.0**（基线 16.0）；test 待跑 |
 | 2026-09-14 | tidyroom | 判卷机制逆向（exe 字符串）+ v3 放置链（move_to_object+put_down_sth 强制入体） | temp/baseline_records/tidyroom/eval_res.run12_48.json | **train 48.0**；test 待跑 |
+| 2026-09-15 | tidyroom | 人工导览校准（TOUR 模式）+ 颈枕尺寸判据（细长圆柱≥35cm→pillow） | temp/baseline_records/tidyroom/eval_res.run14_80.json | **train 80.88**（反超大部队 79）；test 待跑 |
 
 **事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator
 中断、UE 客户端死亡；数据零损失（仓库在 GitHub、归档随盘恢复），重启 UE 后干净重跑成功。
