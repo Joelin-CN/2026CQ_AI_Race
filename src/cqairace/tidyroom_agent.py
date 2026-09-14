@@ -59,6 +59,8 @@ _TOUR = os.environ.get("TIDYROOM_TOUR", "") not in ("", "0", "false")
 _SCOUT = os.environ.get("TIDYROOM_SCOUT", "")
 # 鞋枚举实验：对鞋类物体穷举全部交互接口（能否拿起/放进鞋柜）
 _ENUM_SHOE = os.environ.get("TIDYROOM_ENUM_SHOE", "") not in ("", "0", "false")
+# 枕枚举实验：对矩形枕(13)穷举接口 + 物理挤动推向沙发（42cm 缺口）
+_ENUM_PILLOW = os.environ.get("TIDYROOM_ENUM_PILLOW", "") not in ("", "0", "false")
 
 # VLM 输出词表归一
 _ITEM_ALIASES = {
@@ -169,6 +171,105 @@ class TidyroomAgent(VLMAgent):
                 return o.get("place_location")
         return None
 
+    def _enum_pillow(self) -> None:
+        """对矩形枕穷举接口 + 物理挤动。
+
+        账本：total=6 假设下 13 号枕是 5/6 完成度里唯一缺的 1 件。
+        其位置 (380,213) 距沙发 14 投影(x<=338)仅 42cm——挤动目标明确：
+        用可抓物强制放置在枕的 +x 侧，碰撞把它往 -x（沙发方向）推。
+        """
+        self._scan_rounds(max_rounds=1, submit_vlm=False)
+        pillow = None
+        for oid, o in self._world.items():
+            shape = str(o.get("shape", "")).lower()
+            color = str(o.get("color", "")).lower()
+            if shape == "rectangle" and color in ("beige", "white") \
+                    and min(self._dims(o)) >= self._MIN_DIM \
+                    and max(self._dims(o)) <= self._MAX_ITEM_DIM:
+                pillow = (oid, o)
+                break
+        if pillow is None:
+            logger.info("ENUMP: 无矩形枕")
+            return
+        oid, o = pillow
+        loc = o.get("place_location") or {}
+        logger.info("ENUMP: 目标枕 {} @ ({},{},{}) 尺寸 {}",
+                    oid, loc.get("X"), loc.get("Y"), loc.get("Z"),
+                    tuple(round(v) for v in self._dims(o)))
+
+        # ① 双手 + 贴近 take
+        for hand in (0, 1):
+            r = self._call_with_timeout(self.tongsim.move_and_take_object,
+                                        self.character_id, oid, which_hand=hand,
+                                        default={"result": "timeout"})
+            logger.info("ENUMP take({}) -> {}", hand, r)
+            in_hand, _ = self._call_with_timeout(
+                self.tongsim.has_object_in_hand, self.character_id, default=(False, None))
+            if in_hand:
+                logger.info("ENUMP 抓到了！直接放沙发")
+                self._enum_place_pillow_held(oid)
+                return
+
+        # ② 物理挤动：循环"抓可抓物→强制放到枕 +x 侧贴身"直至枕进沙发投影
+        sofa = None
+        for coid, co in self._world.items():
+            if str(co.get("shape", "")).lower() == "rectangle" and max(self._dims(co)) > 250:
+                sofa = (coid, co)
+                break
+        if sofa is None:
+            logger.info("ENUMP: 未找到沙发，终止")
+            return
+        bb = sofa[1].get("world_aabb") or {}
+        x_max = float((bb.get("max") or {}).get("x", 0))
+        logger.info("ENUMP 沙发 {} 投影 x<={:.0f}", sofa[0], x_max)
+
+        throwers = [moid for moid, mo in self._world.items()
+                    if str(mo.get("shape", "")).lower() in ("cylinder", "round", "irregular")]
+        if not throwers:
+            logger.info("ENUMP: 无可抓投掷物")
+            return
+        for round_i in range(min(6, len(throwers))):
+            now = self._obj_loc_now(oid)
+            logger.info("ENUMP 挤动第 {} 轮: 枕当前位置 {}", round_i + 1, now)
+            if now and float(now.get("X", 999)) <= x_max:
+                logger.info("ENUMP 枕已进沙发投影！停止")
+                break
+            thrower = throwers[round_i]
+            rt = self._call_with_timeout(self.tongsim.move_and_take_object,
+                                         self.character_id, thrower, which_hand=0,
+                                         default={"result": "timeout"})
+            logger.info("ENUMP take({}) -> {}", thrower, rt)
+            if not self._ok(rt):
+                continue
+            px = float(loc.get("X", 0)) + 12   # 枕 +x 侧贴身，砸落时往 -x 挤
+            py = float(loc.get("Y", 0))
+            pz = float(loc.get("Z", 0)) + 25
+            rp = self._call_with_timeout(self.tongsim.put_down_sth, self.character_id,
+                                         target_location={"X": px, "Y": py, "Z": pz},
+                                         auto_rotate=True, force_locate=True,
+                                         default={"result": "timeout"})
+            logger.info("ENUMP put({},{},{}) -> {}", px, py, pz, rp)
+            time.sleep(1)
+        final = self._obj_loc_now(oid)
+        logger.info("ENUMP 最终枕位置: {} (沙发投影 x<={:.0f})", final, x_max)
+
+    def _enum_place_pillow_held(self, oid: str) -> None:
+        cont = self._rule_container("sofa")
+        if cont is None:
+            logger.info("ENUMP: 未识别沙发")
+            return
+        self._call_with_timeout(self.tongsim.move_to_object, self.character_id,
+                                str(cont.get("object_id", "")), default=None)
+        bb = cont.get("world_aabb") or {}
+        mn, mx = bb.get("min") or {}, bb.get("max") or {}
+        point = {"X": round((mn.get("x", 0) + mx.get("x", 0)) / 2, 1),
+                 "Y": round((mn.get("y", 0) + mx.get("y", 0)) / 2, 1),
+                 "Z": round(mn.get("z", 0) + 0.5 * (mx.get("z", 0) - mn.get("z", 0)), 1)}
+        r = self._call_with_timeout(self.tongsim.put_down_sth, self.character_id,
+                                    target_location=point, auto_rotate=True,
+                                    force_locate=True, default={"result": "timeout"})
+        logger.info("ENUMP 枕入沙发 put({}) -> {}", point, r)
+
     def _enum_shoe(self) -> None:
         self._scan_rounds(max_rounds=1, submit_vlm=False)
         shoes = [(oid, o) for oid, o in self._world.items()
@@ -271,7 +372,9 @@ class TidyroomAgent(VLMAgent):
         if self._t0 is None:
             self._t0 = time.time()
         try:
-            if _ENUM_SHOE:
+            if _ENUM_PILLOW:
+                self._enum_pillow()
+            elif _ENUM_SHOE:
                 self._enum_shoe()
             elif _TOUR:
                 self._tour()
