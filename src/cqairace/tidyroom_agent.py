@@ -1,17 +1,16 @@
-"""P4 整理房间 agent：360° 扫描建图 + VLM 一次性分类规划 + 零 VLM 脚本化执行。
+"""P4 整理房间 agent v2：扫描/VLM/搬运流水线化 + 放置确认 + 二轮扫描。
 
-对应基线 16 分的失败解剖（temp/baseline_records/ + logs/ 实测）：
-- 基线 61% 时间耗在逐步 VLM（6.5s/步 × 31 步）→ 本 agent 的 VLM 只在扫描后
-  一次性出现，执行阶段纯元数据驱动；
-- "can not take this object for not pickup" 是物体属性、与距离无关（人脚上的鞋、
-  地毯等）→ take 失败一次永久拉黑，绝不重试；
-- 放置点公式 = 目标容器 AABB 中心 xy + 顶面高度（基线成功案例反推）；
-- 剩余 30s 主动 finish_task 锁住完成度分与时间分。
-
-动作链只用两个复合指令（自带导航，实测成功）：
-- move_and_take_object(object_id)：走到物体旁并抓起；
-- move_and_put_down(move_target_location, put_target_location)：走到 move 点，
-  把手中物放到 put 点。
+v1 教训（2026-09-14 train 六轮实测，见 temp/p4_tidyroom/ 与 v2-notes §7）：
+- VLM 串行等 115s 占总时长一半且常挂 → v2 改流水线：扫描逐帧即时异步发 VLM，
+  规则分类先行开搬（run6 实测规则兜底 5/5 全对），VLM 结果回来只做补充修正；
+- 判卷读物体**最终静止位置**（弹落=白放）→ v2 每件放后感知确认，不稳重放；
+- 判卷机制（逆向 arena_offline.exe/Nuitka 字符串证实）：
+  * 物品在 room_space 内随机撒地面，生成器保证初始全错（放对即重丢）；
+  * "放对" = 物体 bbox 中心落入**任一**合法容器 bbox（container_names 是列表，
+    多容器全合法——run2 放 16 号桌与基线放 15 号茶几均计分）；
+  * score = 0.8×correct/total + 时间分；超时时间分归零；
+- 4×90° 原地扫描实测已覆盖全部物品簇（客厅地毯区 + 玄关鞋区，物品全贴地），
+  二轮扫描作为死角兜底（队列空后触发）。
 
 运行（赛题系统 train tidyroom 已启动，仓库根目录）：
     uv run python -m cqairace.tidyroom_agent --run_times 1
@@ -19,11 +18,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,6 +48,11 @@ from arenaagent.vlm_agent.json_parsor import extract_last_json_from_text  # noqa
 from arenaagent.vlm_agent.vlm_agent import VLMAgent, VLMAgentCfg  # noqa: E402
 
 TRACE_DIR = _REPO_ROOT / "temp" / "p4_tidyroom"
+
+# no-op 实验开关：只扫描规划不搬运，用于校准"初始场景天然完成度"
+_DRY_RUN = os.environ.get("TIDYROOM_DRY_RUN", "") not in ("", "0", "false")
+# 单件实验开关：只搬指定 object_id（逗号分隔），用于校准判卷几何/分值
+_ONLY_OIDS = {s for s in os.environ.get("TIDYROOM_ONLY_OID", "").split(",") if s}
 
 # VLM 输出词表归一
 _ITEM_ALIASES = {
@@ -79,21 +85,22 @@ class TidyroomAgentCfg(VLMAgentCfg):
 
 @Register("tidyroom_agent")
 class TidyroomAgent(VLMAgent):
-    """整理房间三阶段：扫描 → 规划 → 执行，单次 run_step 内完成。"""
+    """整理房间：扫描→规则先行搬运→VLM 异步补充→放置确认→二轮扫描。"""
 
-    _SCAN_TURNS = 4          # 首帧不转 + 3×90°，FOV 120° 全覆盖
-    _TOTAL_BUDGET = 370.0    # 整题预算（秒），首 run_step 起算，留 30s 给判卷
+    _SCAN_TURNS = 4          # 每轮扫描：首帧不转 + 3×90°，FOV 120° 全覆盖
+    _SCAN_ROUNDS = 2         # 首轮 + 二轮（死角兜底）
+    _TOTAL_BUDGET = 370.0    # 整题预算（秒），首 run_step 起算
     _FINISH_RESERVE = 30.0   # finish 看门狗预留
-    _ITEM_COST = 12.0        # 单件 take+put 预估耗时（不够一件就收工）
-    _OP_TIMEOUT = 40.0       # 单次外部调用超时
+    _ITEM_COST = 15.0        # 单件 take+put+确认 预估耗时
+    _OP_TIMEOUT = 40.0       # 单次 tongsim 调用超时
     _VLM_TIMEOUT = 75.0      # 单次 VLM 调用超时（实测大 prompt 推理 68s）
-    _VLM_BUDGET = 115.0      # 阶段 B 的 VLM 总预算（4 帧并行 ≈ 单次耗时）
-    _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本，放宽让抱枕类入队
+    _VLM_BUDGET = 160.0      # VLM 收割总上限（与走路重叠，只作上限）
+    _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
     _MIN_DIM = 2.0           # 排除点状 AABB（墙角标记）
     _MAX_BASE_Z = 150.0      # 排除壁挂/吊灯（place_location Z 上限）
 
-    _pool = ThreadPoolExecutor(max_workers=2)   # tongsim 调用超时兜底
-    _vlm_pool = ThreadPoolExecutor(max_workers=4)  # 4 帧 VLM 并行分类
+    _pool = ThreadPoolExecutor(max_workers=2)       # tongsim 调用超时兜底
+    _vlm_pool = ThreadPoolExecutor(max_workers=4)   # 帧 VLM 并行分类
 
     @classmethod
     def _call_with_timeout(cls, fn: Callable, *args, timeout: float | None = None,
@@ -116,11 +123,16 @@ class TidyroomAgent(VLMAgent):
         super().__init__(stub=stub, channel=channel, cfg=cfg or TidyroomAgentCfg(),
                          sleep_between_steps=sleep_between_steps)
         self._t0: float | None = None
-        self._world: dict[str, dict] = {}        # object_id → 物体元数据（全局清单）
-        self._frames: list[dict] = []            # 扫描帧 [{"image", "objects"}]
-        self._plan: list[dict] | None = None     # 待办队列
-        self._containers: dict[str, dict] = {}   # 容器键 → 元数据
-        self._container_slots: dict[str, int] = {}  # 容器键 → 已放置件数（散点用）
+        self._world: dict[str, dict] = {}          # object_id → 元数据（全局清单）
+        self._categories: dict[str, str] = {}      # object_id → 物品类别
+        self._container_votes: dict[str, Counter] = {}
+        self._containers: dict[str, dict] = {}     # 容器键 → 元数据
+        self._container_slots: dict[str, int] = {}
+        self._queue: list[dict] = []               # 待办队列
+        self._vlm_futs: list[Future] = []          # 在途 VLM 帧分类
+        self._vlm_started = 0.0
+        self._scan_round = 0
+        self._done_oids: set[str] = set()          # 已处理（成功/放弃/拉黑）
         self._blacklist: set[str] = set()
         self._placed = 0
         self._gave_up = 0
@@ -133,105 +145,105 @@ class TidyroomAgent(VLMAgent):
         if self._t0 is None:
             self._t0 = time.time()
         try:
-            if self._plan is None:
-                self._phase_scan()
-                self._phase_plan()
-            self._phase_execute()
+            if _DRY_RUN:
+                logger.info("DRY RUN：仅统计感知，不搬运")
+                self._scan_rounds(max_rounds=1, submit_vlm=False)
+            else:
+                self._pipeline()
         except Exception as exc:  # noqa: BLE001 任何异常不外抛：保住已放件数
-            logger.opt(exception=True).warning("tidyroom 阶段异常（保底收尾）: {}", exc)
-        summary = (f"tidyroom: scanned={len(self._world)} placed={self._placed} "
-                   f"gave_up={self._gave_up} blacklist={sorted(self._blacklist)}")
+            logger.opt(exception=True).warning("tidyroom 流水线异常（保底收尾）: {}", exc)
+        summary = (f"tidyroom: world={len(self._world)} placed={self._placed} "
+                   f"gave_up={self._gave_up} blacklist={sorted(self._blacklist)} "
+                   f"cats={self._categories}")
         logger.info(summary)
-        self._trace("finish", summary=summary,
-                    placed=self._placed, blacklist=sorted(self._blacklist))
-        # 走官方 _handle_finish：置 subject_finished 并以官方格式提交
+        self._trace("finish", summary=summary, placed=self._placed,
+                    blacklist=sorted(self._blacklist), categories=self._categories)
         return self._do_action({"action": "finish_task", "think": summary,
                                 "output": self._placed})
 
     # ------------------------------------------------------------------ #
-    # 阶段 A：扫描建图
+    # 流水线主循环
     # ------------------------------------------------------------------ #
 
-    def _phase_scan(self) -> None:
-        for i in range(self._SCAN_TURNS):
-            p = self._call_with_timeout(
-                self.tongsim.acquire_first_person_perception, self.character_id,
-                1280, 720, default={},
-            )
-            objects = p.get("objects", []) or []
-            self._frames.append({"image": p.get("image", ""), "objects": objects})
-            for obj in objects:
-                oid = str(obj.get("object_id", ""))
-                if not oid:
-                    continue
-                prev = self._world.get(oid)
-                if prev is None or self._vol(obj) > self._vol(prev):
-                    self._world[oid] = obj  # 保留包围盒更完整的一帧
-            if i < self._SCAN_TURNS - 1:
-                self._call_with_timeout(self.tongsim.turn_in_degree,
-                                        self.character_id, 90, default=None)
-                time.sleep(0.5)
-        logger.info("阶段A 扫描完成: {} 帧, 全局清单 {} 物体", len(self._frames), len(self._world))
+    def _pipeline(self) -> None:
+        self._scan_rounds(max_rounds=1, submit_vlm=True)  # 首轮：边扫边发 VLM
+        # 规则分类先行 → 立即开搬，VLM 结果在搬运间隙收割
+        self._apply_rule_categories()
+        self._rebuild_queue()
 
-    # ------------------------------------------------------------------ #
-    # 阶段 B：分类 + 放置规划
-    # ------------------------------------------------------------------ #
+        while True:
+            remain = self._TOTAL_BUDGET - (time.time() - self._t0)
+            if remain < self._FINISH_RESERVE:
+                logger.warning("预算剩余 {:.0f}s 触发看门狗，收工", remain)
+                break
 
-    def _phase_plan(self) -> None:
-        item_votes: dict[str, Counter] = {}
-        container_votes: dict[str, Counter] = {}
+            self._harvest_vlm(block=False)
 
-        # 4 帧 VLM 分类并行发出（实测 deepseek-flash 大 prompt 单次 ~70s，
-        # 串行会耗尽预算；并行后总耗时 ≈ 最慢单次）
-        t_vlm = time.time()
-        futs = [(self._vlm_pool.submit(self._vlm_classify_frame, frame), frame)
-                for frame in self._frames]
-        for fut, _frame in futs:
-            try:
-                remain = self._VLM_BUDGET - (time.time() - t_vlm)
-                if remain <= 5:
-                    logger.warning("VLM 总预算耗尽，停止收取剩余帧")
+            if self._queue:
+                if remain < self._FINISH_RESERVE + self._ITEM_COST:
+                    logger.warning("预算剩余 {:.0f}s 不足一件，收工", remain)
                     break
-                items, conts = fut.result(timeout=remain)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("VLM 帧分类失败: {} {}", type(exc).__name__, exc)
-                items, conts = {}, {}
-            for oid, cat in items.items():
-                item_votes.setdefault(oid, Counter())[cat] += 1
-            for oid, ctype in conts.items():
-                container_votes.setdefault(oid, Counter())[ctype] += 1
-        logger.info("VLM 并行分类完成: {:.1f}s, 物品票 {} 容器票 {}",
-                    time.time() - t_vlm, len(item_votes), len(container_votes))
+                self._execute_one()
+                continue
 
-        categories = {oid: c.most_common(1)[0][0] for oid, c in item_votes.items() if c}
-        containers_raw = {oid: c.most_common(1)[0][0] for oid, c in container_votes.items() if c}
+            # 队列空：等 VLM 新结果（仅首轮扫描后值得等）→ 二轮扫描 → 收工
+            if self._vlm_futs and self._scan_round < self._SCAN_ROUNDS:
+                self._harvest_vlm(block=True, timeout=10.0)
+                continue
+            if self._scan_round < self._SCAN_ROUNDS:
+                logger.info("队列空，触发第 {} 轮扫描", self._scan_round + 1)
+                self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=False)
+                self._apply_rule_categories()
+                self._rebuild_queue()
+                continue
+            # 二轮扫描后不再等 VLM（实测新物体为 0，期望收益≈0，白耗时间分）
+            self._harvest_vlm(block=False)
+            break
 
-        # 容器优先：同一 id 若被标为容器，从物品清单剔除（家具不该被搬）
-        for oid in list(categories):
-            if oid in containers_raw:
-                del categories[oid]
+    # ------------------------------------------------------------------ #
+    # 扫描（每帧即时异步发 VLM）
+    # ------------------------------------------------------------------ #
 
-        # 物品分类规则兜底：VLM 无结果的物体按 shape/color 启发式补齐
-        vlm_miss = [oid for oid in self._world
-                    if oid not in categories and oid not in containers_raw
-                    and not self._is_point(self._world[oid])
-                    and not self._too_high(self._world[oid])]
-        for oid in vlm_miss:
-            cat = self._rule_category(oid)
-            if cat:
-                categories[oid] = cat
-        if vlm_miss:
-            logger.info("物品分类规则兜底: VLM 未覆盖 {} 物体, 补齐 {}",
-                        len(vlm_miss), sum(1 for o in vlm_miss if o in categories))
+    def _scan_rounds(self, max_rounds: int, submit_vlm: bool) -> None:
+        while self._scan_round < max_rounds:
+            self._scan_round += 1
+            new = 0
+            for i in range(self._SCAN_TURNS):
+                p = self._call_with_timeout(
+                    self.tongsim.acquire_first_person_perception, self.character_id,
+                    1280, 720, default={},
+                )
+                objects = p.get("objects", []) or []
+                for obj in objects:
+                    oid = str(obj.get("object_id", ""))
+                    if not oid:
+                        continue
+                    prev = self._world.get(oid)
+                    if prev is None:
+                        new += 1
+                    if prev is None or self._vol(obj) > self._vol(prev):
+                        self._world[oid] = obj
+                if submit_vlm and p.get("image"):
+                    self._submit_vlm_frame(p.get("image", ""), objects)
+                if i < self._SCAN_TURNS - 1:
+                    self._call_with_timeout(self.tongsim.turn_in_degree,
+                                            self.character_id, 90, default=None)
+                    time.sleep(0.4)
+            logger.info("扫描第 {} 轮完成: 新增 {} 物体, 全局清单 {} 物体, 在途 VLM {}",
+                        self._scan_round, new, len(self._world), len(self._vlm_futs))
 
-        self._containers = self._resolve_containers(containers_raw)
-        self._plan = self._build_queue(categories)
-        logger.info("阶段B 规划完成: 容器={} 队列={} 类别={}",
-                    {k: v.get("object_id") for k, v in self._containers.items()},
-                    [(t["oid"], t["cat"]) for t in self._plan], categories)
+    def _submit_vlm_frame(self, image_b64: str, objects: list[dict]) -> None:
+        if not self._vlm_started:
+            self._vlm_started = time.time()
+        frame = {"image": image_b64, "objects": objects}
+        self._vlm_futs.append(self._vlm_pool.submit(self._vlm_classify_frame, frame))
+
+    # ------------------------------------------------------------------ #
+    # VLM 分类与收割
+    # ------------------------------------------------------------------ #
 
     def _vlm_classify_frame(self, frame: dict) -> tuple[dict[str, str], dict[str, str]]:
-        """单帧 VLM 标注，返回 (物品类别, 容器类型)。失败返回空 dict（由规则兜底）。"""
+        """单帧 VLM 标注，返回 (物品类别, 容器类型)。失败返回空 dict。"""
         compact = []
         for o in frame["objects"]:
             oid = str(o.get("object_id", ""))
@@ -266,14 +278,20 @@ class TidyroomAgent(VLMAgent):
         messages = [{
             "role": "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + frame["image"]}},
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/jpeg;base64," + frame["image"]}},
                 {"type": "text", "text": prompt},
             ],
         }]
-        for attempt in range(2):  # 推理模型可能空正文/超时，重试一次
-            resp = self._call_with_timeout(self.vlm_client.invoke, messages,
-                                           timeout=self._VLM_TIMEOUT)
-            if resp is None:
+        for attempt in range(2):
+            # 直接裸调 invoke（本函数已跑在 _vlm_pool 线程，挂死由外层
+            # future.result 超时兜底）；不走 _pool——那 2 个 worker 是留给
+            # 主线程 tongsim 调用的，被 VLM 长占会导致转身/感知排队超时。
+            try:
+                resp = self.vlm_client.invoke(messages)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("VLM invoke 异常(第{}次): {} {}", attempt + 1,
+                               type(exc).__name__, exc)
                 continue
             text = getattr(resp, "text", "") or ""
             if not text.strip():
@@ -284,8 +302,7 @@ class TidyroomAgent(VLMAgent):
                 data = json.loads(parsed) if isinstance(parsed, str) else parsed
                 items = self._normalize_map(data.get("items") or {}, _ITEM_ALIASES)
                 conts = self._normalize_map(data.get("containers") or {}, _CONTAINER_ALIASES)
-                conts = {k: v for k, v in conts.items() if v}
-                return items, conts
+                return items, {k: v for k, v in conts.items() if v}
             except Exception as exc:  # noqa: BLE001
                 logger.warning("VLM 输出解析失败(第{}次): {}", attempt + 1, exc)
                 continue
@@ -308,8 +325,95 @@ class TidyroomAgent(VLMAgent):
                     out[key] = cat
         return out
 
-    def _resolve_containers(self, voted: dict[str, str]) -> dict[str, dict]:
-        """VLM 容器投票结果 → 每类容器选一个元数据对象；缺的/垃圾桶用规则校正。"""
+    def _harvest_vlm(self, block: bool, timeout: float = 0.0) -> bool:
+        """收割已完成的 VLM future，合并到类别/容器票。返回是否有新信息。
+
+        block=True 时最多只等第一个未完成的 future（其余只收已完成的）。
+        """
+        if not self._vlm_futs:
+            return False
+        changed = False
+        pending: list[Future] = []
+        waited = False
+        for fut in self._vlm_futs:
+            try:
+                if not fut.done():
+                    if not (block and not waited):
+                        pending.append(fut)
+                        continue
+                    waited = True
+                    budget = self._VLM_BUDGET - (time.time() - self._vlm_started)
+                    if budget <= 0:
+                        pending.append(fut)
+                        continue
+                    items, conts = fut.result(timeout=min(timeout, max(budget, 1.0)))
+                else:
+                    items, conts = fut.result(timeout=0.1)
+            except FuturesTimeout:
+                pending.append(fut)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("VLM 帧失败: {} {}", type(exc).__name__, exc)
+                continue
+            for oid, cat in items.items():
+                if oid in self._done_oids or cat in ("other", "worn"):
+                    continue
+                if self._world.get(oid) is None:
+                    continue
+                if self._categories.get(oid) != cat:
+                    self._categories[oid] = cat
+                    changed = True
+            for oid, ctype in conts.items():
+                if self._world.get(oid) is not None:
+                    self._container_votes.setdefault(oid, Counter())[ctype] += 1
+                    changed = True
+        self._vlm_futs = pending
+        if changed:
+            self._resolve_containers()
+            self._rebuild_queue()
+        return changed
+
+    # ------------------------------------------------------------------ #
+    # 规则分类兜底（先行）
+    # ------------------------------------------------------------------ #
+
+    def _apply_rule_categories(self) -> None:
+        for oid, obj in self._world.items():
+            if oid in self._done_oids or oid in self._categories:
+                continue
+            if self._is_point(obj) or self._too_high(obj):
+                continue
+            cat = self._rule_category(oid)
+            if cat:
+                self._categories[oid] = cat
+        self._resolve_containers()
+
+    def _rule_category(self, oid: str) -> str | None:
+        obj = self._world.get(oid)
+        if obj is None:
+            return None
+        shape = str(obj.get("shape", "")).lower()
+        color = str(obj.get("color", "")).lower()
+        if shape in ("boot", "shoe"):
+            return "shoe"
+        if shape == "cylinder":
+            return "cup"
+        if shape == "irregular":
+            return "trash"
+        if shape == "round":
+            return "food"
+        if shape == "rectangle" and color in ("beige", "white") \
+                and max(self._dims(obj)) < self._MAX_ITEM_DIM:
+            return "pillow"
+        return None
+
+    # ------------------------------------------------------------------ #
+    # 容器解析
+    # ------------------------------------------------------------------ #
+
+    def _resolve_containers(self) -> None:
+        """VLM 投票为主 + 规则校正；trash_bin 规则强校正（黑小方箱特征极强）。"""
+        voted = {oid: c.most_common(1)[0][0] for oid, c in self._container_votes.items() if c}
         resolved: dict[str, dict] = {}
         for oid, ctype in voted.items():
             obj = self._world.get(oid)
@@ -317,23 +421,19 @@ class TidyroomAgent(VLMAgent):
                 continue
             prev = resolved.get(ctype)
             if prev is None or self._vol(obj) > self._vol(prev):
-                resolved[ctype] = obj  # 同类取包围盒更大的（主体而非部件）
+                resolved[ctype] = obj
         for ctype in ("trash_bin", "table", "sofa", "shoe_cabinet"):
-            # 垃圾桶规则优先：黑小方箱特征极强，VLM 常把绿植等大件误标为垃圾桶
             rule = self._rule_container(ctype)
             if ctype == "trash_bin" and rule is not None:
-                if ctype not in resolved or resolved[ctype].get("object_id") != rule.get("object_id"):
-                    logger.info("trash_bin 规则校正: {} -> {}",
-                                resolved.get(ctype, {}).get("object_id"), rule.get("object_id"))
                 resolved[ctype] = rule
             elif ctype not in resolved and rule is not None:
                 resolved[ctype] = rule
-                logger.info("容器 {} 规则兜底命中 object_id={}", ctype, rule.get("object_id"))
-        return resolved
+        # 防倒退：已有容器不被规则清空
+        for k, v in resolved.items():
+            self._containers[k] = v
 
     def _rule_container(self, ctype: str) -> dict | None:
-        """容器识别的 shape/color 启发式（VLM 缺失时的兜底）。"""
-        best, best_score = None, 0.0
+        best, best_vol = None, 0.0
         for oid, obj in self._world.items():
             color = str(obj.get("color", "")).lower()
             shape = str(obj.get("shape", "")).lower()
@@ -344,15 +444,14 @@ class TidyroomAgent(VLMAgent):
             if ctype == "trash_bin":
                 hit = color == "black" and shape == "box"
             elif ctype == "table":
-                # 桌面矮胖（茶几 72×137×29），柜体细长（电视柜 43×240×37）
                 hit = color == "brown" and shape == "rectangle" \
                     and 25 <= dz <= 55 and max(dx, dy) < 200
             elif ctype == "sofa":
                 hit = shape == "rectangle" and max(dx, dy) > 250 and dz < 120
             elif ctype == "shoe_cabinet":
                 hit = color == "brown" and shape == "rectangle" and dz > 55
-            if hit and self._vol(obj) > best_score:
-                best, best_score = obj, self._vol(obj)
+            if hit and self._vol(obj) > best_vol:
+                best, best_vol = obj, self._vol(obj)
         if ctype == "shoe_cabinet":
             near = self._nearest_shoe_container(best)
             if near is not None:
@@ -360,7 +459,6 @@ class TidyroomAgent(VLMAgent):
         return best
 
     def _nearest_shoe_container(self, fallback: dict | None) -> dict | None:
-        """鞋柜兜底判据：鞋类物体 xy 质心最近的 brown rectangle（距离 <300cm）。"""
         shoes = [o for o in self._world.values()
                  if str(o.get("shape", "")).lower() in ("boot", "shoe")]
         if not shoes:
@@ -380,129 +478,164 @@ class TidyroomAgent(VLMAgent):
                 best, best_d = obj, d
         return best
 
-    def _rule_category(self, oid: str) -> str | None:
-        """物品分类的 shape 启发式（VLM 完全失败时兜底）。"""
-        obj = self._world.get(oid)
-        if obj is None:
-            return None
-        shape = str(obj.get("shape", "")).lower()
-        color = str(obj.get("color", "")).lower()
-        if shape in ("boot", "shoe"):
-            return "shoe"
-        if shape == "cylinder":
-            return "cup"
-        if shape == "irregular":
-            return "trash"
-        if shape == "round":
-            return "food"
-        if shape == "rectangle" and color in ("beige", "white") and max(self._dims(obj)) < 60:
-            return "pillow"
-        return None
+    # ------------------------------------------------------------------ #
+    # 队列构建
+    # ------------------------------------------------------------------ #
 
-    def _build_queue(self, categories: dict[str, str]) -> list[dict]:
-        """分类结果 → 待办队列（可抓候选 + 有目标容器 + 未在位 + 分组排序）。"""
+    def _rebuild_queue(self) -> None:
         queue: list[dict] = []
-        for oid, cat in categories.items():
-            obj = self._world.get(oid)
-            if obj is None or cat in ("other", "worn"):
+        for oid, cat in self._categories.items():
+            if oid in self._done_oids:
                 continue
-            if self._is_point(obj) or self._too_high(obj):
-                continue  # 点状标记 / 壁挂吊灯
+            if _ONLY_OIDS and oid not in _ONLY_OIDS:
+                continue
+            obj = self._world.get(oid)
             cont_key = _CAT_TO_CONTAINER.get(cat)
             cont = self._containers.get(cont_key) if cont_key else None
-            if cont is None:
-                logger.info("物品 {} 类别 {} 无目标容器，跳过", oid, cat)
+            if obj is None or cont is None:
                 continue
             dx, dy, dz = self._dims(obj)
             if max(dx, dy, dz) > self._MAX_ITEM_DIM or min(dx, dy, dz) < self._MIN_DIM:
-                continue  # 家具/地毯/巨型物不搬
+                continue
             if self._on_target(obj, cont):
-                logger.info("物品 {} 已在目标 {} 上，跳过", oid, cont_key)
                 continue
             put, put_retry = self._put_points(cont, cont_key)
-            queue.append({"oid": oid, "cat": cat, "obj": obj, "cont_key": cont_key,
+            queue.append({"oid": oid, "cat": cat, "cont_key": cont_key,
                           "put": put, "put_retry": put_retry,
                           "move": self._move_point(put)})
-        # 分组（先易后难）+ 组内按 object_id 稳定排序
         queue.sort(key=lambda t: (_CAT_ORDER.get(t["cat"], 9), t["oid"]))
-        return queue
+        self._queue = queue
 
     # ------------------------------------------------------------------ #
-    # 阶段 C：执行（零 VLM）
+    # 执行（单件：take → put → 确认 → 必要时重放）
     # ------------------------------------------------------------------ #
 
-    def _phase_execute(self) -> None:
-        assert self._plan is not None
-        while self._plan:
-            remain = self._TOTAL_BUDGET - (time.time() - self._t0)
-            if remain < self._FINISH_RESERVE + self._ITEM_COST:
-                logger.warning("预算剩余 {:.0f}s 不足一件，收工", remain)
-                break
-            task = self._plan.pop(0)
-            oid = task["oid"]
-            if oid in self._blacklist:
-                continue
+    def _execute_one(self) -> None:
+        task = self._queue.pop(0)
+        oid = task["oid"]
+        t1 = time.time()
 
-            t1 = time.time()
-            take = self._call_with_timeout(
-                self.tongsim.move_and_take_object, self.character_id, oid,
-                which_hand=0, default={},
-            )
-            take_s = time.time() - t1
-            if not self._ok(take):
-                self._blacklist.add(oid)
-                logger.info("take {} 失败({}) → 拉黑, 耗时 {:.1f}s",
-                            oid, self._err(take), take_s)
-                self._trace("take_failed", oid=oid, cat=task["cat"],
-                            res=self._err(take), sec=round(take_s, 1))
-                continue
+        take = self._call_with_timeout(
+            self.tongsim.move_and_take_object, self.character_id, oid,
+            which_hand=0, default={},
+        )
+        if not self._ok(take):
+            self._done_oids.add(oid)
+            self._blacklist.add(oid)
+            logger.info("take {} 失败({}) → 拉黑, {:.1f}s", oid, self._err(take), time.time() - t1)
+            self._trace("take_failed", oid=oid, cat=task["cat"], res=self._err(take))
+            return
 
-            t2 = time.time()
+        ok = self._put_with_retry(task)
+        self._done_oids.add(oid)
+        if ok:
+            self._placed += 1
+            self._container_slots[task["cont_key"]] = \
+                self._container_slots.get(task["cont_key"], 0) + 1
+            logger.info("件完成 {} → {} ({:.1f}s), 累计 {}",
+                        oid, task["cont_key"], time.time() - t1, self._placed)
+            self._trace("placed", oid=oid, cat=task["cat"], cont=task["cont_key"],
+                        sec=round(time.time() - t1, 1))
+        else:
+            self._gave_up += 1
+            logger.warning("件放弃 {} ({})", oid, task["cont_key"])
+            self._trace("gave_up", oid=oid, cat=task["cat"], cont=task["cont_key"])
+
+    def _put_with_retry(self, task: dict) -> bool:
+        """放置链 v3（实机观察修正，2026-09-14 run11）：
+
+        move_and_put_down 的 move 点不控制朝向，人物到达后按行进方向放手，
+        物体释放在"人物面前"——没正对容器就全掉在旁边地上（run11 杯子全灭）。
+        而 put_down_sth 是强制坐标放置（run11 的 33 号被它直接"穿模"送进
+        茶几内部）。故组合：
+          move_to_object(容器) → 到达即面向容器
+          put_down_sth(容器 AABB 内部点, force_locate) → 物体直接出现在容器体内
+        """
+        cont = self._containers.get(task["cont_key"])
+        if cont is None:
+            return False
+        move = self._call_with_timeout(
+            self.tongsim.move_to_object, self.character_id,
+            str(cont.get("object_id", "")), default={},
+        )
+        if not self._ok(move):
+            logger.info("move_to_object({}) 失败: {}", task["cont_key"], self._err(move))
+
+        for label, point in (("内部点", task["put"]), ("内部点2", task["put_retry"])):
             put = self._call_with_timeout(
-                self.tongsim.move_and_put_down, self.character_id,
-                move_target_location=task["move"], put_target_location=task["put"],
-                which_hand=0, default={},
+                self.tongsim.put_down_sth, self.character_id,
+                target_location=point, auto_rotate=True, force_locate=True,
+                default={},
             )
-            put_s = time.time() - t2
-            if self._ok(put):
-                self._placed += 1
-                self._container_slots[task["cont_key"]] = \
-                    self._container_slots.get(task["cont_key"], 0) + 1
-                logger.info("put {} → {} 成功 ({:.1f}s+{:.1f}s), 累计 {} 件",
-                            oid, task["cont_key"], take_s, put_s, self._placed)
-                self._trace("placed", oid=oid, cat=task["cat"], cont=task["cont_key"],
-                            put=task["put"], sec=round(take_s + put_s, 1))
-                continue
-
-            # 放置重试：容器中心顶面（保守点）
-            put2 = self._call_with_timeout(
-                self.tongsim.move_and_put_down, self.character_id,
-                move_target_location=task["move"], put_target_location=task["put_retry"],
-                which_hand=0, default={},
-            )
-            if self._ok(put2):
-                self._placed += 1
-                self._container_slots[task["cont_key"]] = \
-                    self._container_slots.get(task["cont_key"], 0) + 1
-                logger.info("put {} → {} 重试成功, 累计 {} 件", oid, task["cont_key"], self._placed)
-                self._trace("placed_retry", oid=oid, cat=task["cat"], cont=task["cont_key"],
-                            put=task["put_retry"], sec=round(time.time() - t2, 1))
-                continue
-
-            # 仍失败：确认手中是否有物，有则原地放下防卡手
+            if self._ok(put) and self._confirm_placed(task["oid"], task["cont_key"]):
+                return True
             in_hand, _ = self._call_with_timeout(
                 self.tongsim.has_object_in_hand, self.character_id, default=(False, None),
             )
-            if in_hand:
-                self._call_with_timeout(
-                    self.tongsim.put_down_sth, self.character_id,
-                    target_location=task["put"], auto_rotate=True, default={},
+            if not in_hand:
+                retake = self._call_with_timeout(
+                    self.tongsim.move_and_take_object, self.character_id, task["oid"],
+                    which_hand=0, default={},
                 )
-            self._gave_up += 1
-            logger.warning("put {} 两次失败({}/{})，放弃本件",
-                           oid, self._err(put), self._err(put2))
-            self._trace("put_failed", oid=oid, cat=task["cat"], cont=task["cont_key"],
-                        err1=self._err(put), err2=self._err(put2))
+                if not self._ok(retake):
+                    return False
+        # 两个点都没确认成功：原地放下防卡手
+        self._call_with_timeout(
+            self.tongsim.put_down_sth, self.character_id,
+            target_location=task["put_retry"], auto_rotate=True, default={},
+        )
+        return False
+
+    def _confirm_placed(self, oid: str, cont_key: str) -> bool:
+        """感知确认物体最终位置——完全复刻判卷几何（逆向 _is_right_put）：
+        物体 world_aabb **中心点** 落入容器 world_aabb（三轴，无容差）。
+
+        历史：v2 曾用 place_location 锚点+容差判定，导致放置在茶几顶的
+        杯子"锚点 z=47 通过"而"bbox 中心 z≈55 超界判错"，run9/run10 两轮
+        确认全过却 0 分——确认与判卷几何必须一致。
+        感知失败（UE 卡顿返回空）按未确认处理；感知有效但物体不在视野
+        时乐观 True（典型：进桶后被桶壁遮挡）。
+        """
+        cont = self._containers.get(cont_key)
+        if cont is None:
+            return True
+        p = self._call_with_timeout(
+            self.tongsim.acquire_first_person_perception, self.character_id,
+            1280, 720, default={},
+        )
+        if not p.get("image"):
+            logger.warning("确认感知失败（UE 卡顿?），按未确认处理")
+            return False
+        for obj in p.get("objects", []) or []:
+            if str(obj.get("object_id", "")) == oid:
+                ok = self._center_in_bbox(obj, cont)
+                if not ok:
+                    logger.info("放置确认失败: {} bbox中心={} 不在 {} bbox 内",
+                                oid, self._bb_center(obj), cont_key)
+                    self._trace("confirm_failed", oid=oid, cont=cont_key,
+                                loc=obj.get("place_location"), aabb=obj.get("world_aabb"))
+                return ok
+        return True  # 感知有效但物体不在视野（桶内/被挡），乐观处理
+
+    @staticmethod
+    def _bb_center(obj: dict) -> tuple[float, float, float]:
+        bb = obj.get("world_aabb") or {}
+        mn, mx = bb.get("min") or {}, bb.get("max") or {}
+        try:
+            return ((float(mn.get("x", 0)) + float(mx.get("x", 0))) / 2,
+                    (float(mn.get("y", 0)) + float(mx.get("y", 0))) / 2,
+                    (float(mn.get("z", 0)) + float(mx.get("z", 0))) / 2)
+        except (TypeError, ValueError):
+            return 0.0, 0.0, 0.0
+
+    @classmethod
+    def _center_in_bbox(cls, obj: dict, cont: dict) -> bool:
+        """判卷同款几何：物体 bbox 中心 ∈ 容器 bbox（中心±半宽，三轴）。"""
+        cx, cy, cz = cls._bb_center(obj)
+        bx, by, bz = cls._bb_center(cont)
+        dx, dy, dz = cls._dims(cont)
+        return (abs(cx - bx) <= dx / 2 and abs(cy - by) <= dy / 2
+                and abs(cz - bz) <= dz / 2)
 
     # ------------------------------------------------------------------ #
     # 几何工具
@@ -544,32 +677,27 @@ class TidyroomAgent(VLMAgent):
                 float(mx.get("x", 0)), float(mx.get("y", 0)))
 
     def _put_points(self, cont: dict, cont_key: str) -> tuple[dict, dict]:
-        """主放置点（AABB 内散点）+ 重试点（中心顶面）。坐标系 {"X","Y","Z"} cm。
+        """两个放置点，均为容器 world_aabb **内部**（v3 配合 put_down_sth 强制放置）。
 
-        公式来自基线成功案例：put = 容器 AABB 中心 xy + 顶面高度。
-        垃圾桶例外：z 取桶身中上部（基线 30 = min_z+0.7×高 实测成功）。
+        判卷要求物体 bbox 中心 ∈ 容器 bbox（三轴）→ 强制放置在容器体内
+        （xy 带散点防叠、z 取中部）后中心大概率留在 bbox 内。
         """
         bb = cont.get("world_aabb") or {}
         mn, mx = bb.get("min") or {}, bb.get("max") or {}
         x0, y0 = float(mn.get("x", 0)), float(mn.get("y", 0))
         x1, y1 = float(mx.get("x", 0)), float(mx.get("y", 0))
         z0, z1 = float(mn.get("z", 0)), float(mx.get("z", 0))
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
 
-        if cont_key == "trash_bin":
-            pz = z0 + 0.7 * (z1 - z0)
-            return ({"X": cx, "Y": cy, "Z": pz},
-                    {"X": cx, "Y": cy, "Z": z0 + 0.7 * (z1 - z0)})
-
-        # 收缩 20% 网格散点（2×2 顺序取），同件数复用最后一个点
+        z_mid = round(z0 + 0.5 * (z1 - z0), 1)
+        z_low = round(z0 + 0.3 * (z1 - z0), 1)
         mx_x, mx_y = x0 + 0.2 * (x1 - x0), y0 + 0.2 * (y1 - y0)
         w, h = max((x1 - x0) * 0.6, 1), max((y1 - y0) * 0.6, 1)
         slot = self._container_slots.get(cont_key, 0)
         gx = mx_x + (0.5 if slot % 2 else 0.0) * w
         gy = mx_y + (0.5 if (slot // 2) % 2 else 0.0) * h
-        top = z1 + 2
-        return ({"X": round(gx, 1), "Y": round(gy, 1), "Z": round(top, 1)},
-                {"X": round(cx, 1), "Y": round(cy, 1), "Z": round(top, 1)})
+        main = {"X": round(gx, 1), "Y": round(gy, 1), "Z": z_mid}
+        retry = {"X": round((x0 + x1) / 2, 1), "Y": round((y0 + y1) / 2, 1), "Z": z_low}
+        return main, retry
 
     def _move_point(self, put: dict) -> dict:
         """角色导航点：put 点向场景中心方向偏移 45cm，站到容器开放侧，z=0。"""
@@ -590,9 +718,9 @@ class TidyroomAgent(VLMAgent):
         return sx / len(self._world), sy / len(self._world)
 
     def _on_target(self, obj: dict, cont: dict) -> bool:
-        """物品当前位置已在容器内/上 → 无需搬运。
+        """物品当前位置已在容器内/上。
 
-        z 判据用"顶面附近"（max_z - 0.6×高 ~ max_z+25）：容器 AABB 投影内
+        z 判据用"顶面附近"（max_z-0.6×高 ~ max_z+25）：容器 AABB 投影内
         贴地的物品（如鞋柜脚边的鞋）不算在位，必须接近顶面/桶口才算。
         """
         loc = obj.get("place_location") or {}

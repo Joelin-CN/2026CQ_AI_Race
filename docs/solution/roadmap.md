@@ -235,6 +235,28 @@ VLM 4 帧并行分类（物品→容器映射，~60-115s）→ 零 VLM 脚本执
 **前台全屏游戏占用 GPU**（UE 渲染线程被抢占），21:15 后暂停验证。
 待恢复后：多轮 train 验证 80cm 上限收益 + 完成度分母精算 + test 重跑换 bin。
 
+### 2026-09-14 深夜：tidyroom 判卷机制逆向 + v3 放置链破局——train 48 分
+
+**判卷机制逆向**（arena_offline.exe 为 Nuitka 打包，Python 常量明文可读）：
+物品随机撒地面且生成器保证初始全错；"放对"=物体 world_aabb 中心落入任一
+合法容器 bbox（多容器全合法）；0.8×correct/total + 时间分。详见
+v2-system-notes §7。
+
+**12 轮 train 迭代**（关键转折）：
+- v1（32 分）：串行三阶段，VLM 115s 占半程且常挂；
+- v2 流水线（run9-11，0 分×3）：扫描即发 VLM/规则先行/放后确认，但
+  `move_and_put_down` 不控制人物朝向（实机观察证实），物品全释放在
+  桌旁地面；确认几何与判卷不一致（锚点 vs bbox 中心）掩盖了真相；
+- **v3（run12，48 分）**：`take → move_to_object(容器) → put_down_sth
+  (容器AABB内部点, force_locate=True)`——面向交给导航、精度交给强制
+  放置，5/5 全计分。基线 16 → 48（3 倍）。
+
+**实机观察是破局关键**（用户看 UE 发现朝向问题与穿模行为）：
+log 只能看到成败，物理过程必须看画面。
+
+待办：多轮 train 验证稳定性（total 分母精算）→ test 重跑换 bin →
+探索鞋类是否可收（4 双鞋 not pickup 是否场景干扰项）。
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
@@ -246,6 +268,7 @@ VLM 4 帧并行分类（物品→容器映射，~60-115s）→ 零 VLM 脚本执
 | 2026-09-14 | counting | 自研 counting agent（扫描+VLM分类+聚类去重+重试轮换） | temp/p2_counting/trace.jsonl + task log | **train 10/10 对，均分 66.23**（基线 53.14） |
 | 2026-09-14 | counting | test 模式重跑（10/10 首答提交，零重试满速）+ 换 bin 重打包 | temp/baseline_records/submission_20260914_pm/ | 待官网验证（预估 70±） |
 | 2026-09-14 | tidyroom | 自研三阶段 agent（扫描+VLM 并行分类+零 VLM 执行，拉黑机制） | temp/baseline_records/tidyroom/ + temp/p4_tidyroom/trace.jsonl | **train 32.0**（基线 16.0）；test 待跑 |
+| 2026-09-14 | tidyroom | 判卷机制逆向（exe 字符串）+ v3 放置链（move_to_object+put_down_sth 强制入体） | temp/baseline_records/tidyroom/eval_res.run12_48.json | **train 48.0**；test 待跑 |
 
 **事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator
 中断、UE 客户端死亡；数据零损失（仓库在 GitHub、归档随盘恢复），重启 UE 后干净重跑成功。
