@@ -179,6 +179,29 @@
   题目标识），所以必须用新题库系统重跑，无法只换打包工具
 - 待用户上传验证
 
+### 2026-09-14 上午：P2-raven 破局——官方 ResNet 在 v2 题库上百发百中
+
+**核心发现（离线+在线双重验证）**：
+1. v1 旧系统上瑞文 0/10 是**旧版判卷/题库缺陷**；v2 补丁版（新题库+答案归一化）上，
+   官方 ResNet 首选答案 **13/13 全对（train 模式实测，含 6 种不同题型）**，秒级提交
+   得分 97.0~99.7。
+2. v2 赛题系统语义：**一题一提交**（提交即结束该题，无重试），且**一题一连接**
+   （agent 答完自己的题其 session 即 FINISHED，需新建连接领下一题；官方 builder 的
+   run_times 循环天然如此，自定义 run() 勿常驻轮询 session）。
+3. structure 嵌入猜想被否（空/训练值输出完全一致）；裁剪坐标正确（2376×1200 横排
+   三题，group_coords.json 吻合）。
+
+**实现**：`src/cqairace/raven_proto.py`——`RavenCollectorAgent(VLMAgent)` 跳过感知与
+VLM 循环，run_step 直接：物化题图 → ResNet 全量排序 → 首选三位数提交（含同题限速、
+题图归档、轨迹 jsonl）。这既是标注采集器也是生产级 raven 路径。
+运行：`uv run python -m cqairace.raven_proto --run_times 10`（需 VLM_CLIENT_* 环境变量
+仅用于通过官方 client 构建断言，实际不调用模型）。
+
+**落地**：用该 agent 重跑 test 模式 raven（10 题全部首选秒答）→ 重新打包
+`release_v2\...\arena_offline\result_package.bin`（备份
+`temp/baseline_records/submission_20260914_am/`）。**raven 任务分预期从 0 → ~99**，
+预估总分 ~37 → **~52**。待中午 12:00 官网校验生效后上传。
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
@@ -186,6 +209,7 @@
 | 2026-09-13 | 全部 | 建立基线（无改动，官方 agent + DeepSeek-flash） | temp/baseline_records/ | 见上表 |
 | 2026-09-13 | 全部 | test 模式保底提交打包（旧构建，被官网拒收） | temp/baseline_records/submission_20260913/ | 被拒 |
 | 2026-09-14 | 全部 | 补丁版（新题库）重跑五任务 + 重新打包 | temp/baseline_records/submission_20260914_v2/ | 待上传 |
+| 2026-09-14 | raven | 自研秒答 agent（ResNet 首选直接提交）重跑 test | temp/baseline_records/submission_20260914_am/ + temp/p2_raven/trace.jsonl | train 13/13 对（97~99.7）；test 待官网验证 |
 
 ## 附录：命令速查
 

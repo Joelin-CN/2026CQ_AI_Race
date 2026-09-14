@@ -120,7 +120,7 @@
 | 任务 | 主要路线 | 关键杠杆 | 状态 |
 |---|---|---|---|
 | counting 分类计数 | 确定性聚合：转身 360° 扫描 + `objects` 按 object_id/世界坐标去重 + 颜色/形状统计 | objects 元数据 | 规划 |
-| raven 瑞文测试 | 复用官方 ResNet18+MLP 专家模型 | 权重已带；注意 `/tmp` 路径在 Windows 的兼容问题 | 规划 |
+| raven 瑞文测试 | **已破局（2026-09-14）**：官方 ResNet 首选 + 直接提交，v2 题库 train 实测 13/13 对（97~99.7 分）。实现见 `src/cqairace/raven_proto.py`；旧系统 0 分系 v1 判卷/题库缺陷 | 一题一提交/一题一连接的 v2 语义 | ✅ 验证通过 |
 | npc 对话 | 强 LLM 多轮对话收集线索，`submit_answer` 提交 | `speak_to_npc` 返回 `npc_reply`+`hints` 注入下一轮 prompt（官方已有） | 规划 |
 | tidyroom 整理房间 | 规则化空间规划（`place_location`/`world_aabb`/高度约束）+ VLM 语义分类"什么放哪" | 官方 task_prompt 提示按包围盒与放置高度规划 | 规划 |
 | jigsaw 拼图 | 分割图形状匹配做确定性放置 + VLM 兜底 | 官方提示：拼图块 X=837、观察点 (750,191)，场景固定 | 规划 |
