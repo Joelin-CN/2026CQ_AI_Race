@@ -112,6 +112,8 @@ class TidyroomAgent(VLMAgent):
     _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
     _MIN_DIM = 2.0           # 排除点状 AABB（墙角标记）
     _MAX_BASE_Z = 150.0      # 排除壁挂/吊灯（place_location Z 上限）
+    _PAIR_DIST = 50.0        # 鞋成对判定的最大间距（cm，实测一双两脚相距 9~11cm）
+    _PAIR_DIM_TOL = 12.0     # 鞋成对判定的尺寸容差（cm）
 
     _pool = ThreadPoolExecutor(max_workers=2)       # tongsim 调用超时兜底
     _vlm_pool = ThreadPoolExecutor(max_workers=4)   # 帧 VLM 并行分类
@@ -143,7 +145,12 @@ class TidyroomAgent(VLMAgent):
         self._containers: dict[str, dict] = {}     # 容器键 → 元数据
         self._container_slots: dict[str, int] = {}
         self._queue: list[dict] = []               # 待办队列
-        self._vlm_futs: list[Future] = []          # 在途 VLM 帧分类
+        self._vlm_futs: list[tuple[int, Future]] = []  # 在途 VLM 帧分类 (seq, future)
+        self._vlm_frames: dict[int, dict] = {}     # seq → 帧数据（换帧重发用）
+        self._vlm_retried: set[int] = set()        # 已换发过的帧
+        self._vlm_dead = 0                         # 重发后仍失败的帧数（全挂检测）
+        self._vlm_seq = 0
+        self._vlm_futs_pending_resubmit: list[dict] = []
         self._item_votes: dict[str, Counter] = {}  # VLM 多帧投票（跨收割累积）
         self._rule_cats: set[str] = set()          # 规则已分且高置信的物体
         self._vlm_started = 0.0
@@ -513,8 +520,11 @@ class TidyroomAgent(VLMAgent):
     def _submit_vlm_frame(self, image_b64: str, objects: list[dict]) -> None:
         if not self._vlm_started:
             self._vlm_started = time.time()
-        frame = {"image": image_b64, "objects": objects}
-        self._vlm_futs.append(self._vlm_pool.submit(self._vlm_classify_frame, frame))
+        self._vlm_seq += 1
+        seq = self._vlm_seq
+        self._vlm_frames[seq] = {"image": image_b64, "objects": objects}
+        self._vlm_futs.append((seq, self._vlm_pool.submit(self._vlm_classify_frame,
+                                                          self._vlm_frames[seq])))
 
     # ------------------------------------------------------------------ #
     # VLM 分类与收割
@@ -539,16 +549,21 @@ class TidyroomAgent(VLMAgent):
             "这是仿真环境第一视角复合图（左半 RGB，右半是带数字编号的语义分割图，"
             "编号与下方元数据的 object_id 一一对应）。场景是客厅+玄关，任务是整理房间。\n"
             "请把当前画面里可见的物体分成两类：\n"
-            "1. items：散乱摆放、需要整理的小物件。类别只能是：\n"
-            "   trash(垃圾碎屑)、cup(杯子/饮料罐)、food(食物/水果)、shoe(散落在地上的鞋靴)、"
-            "pillow(抱枕靠垫,含圆柱形颈枕——长度超过 30cm 的细长圆柱是颈枕不是杯子)。\n"
-            "   特别注意：穿在人脚上的鞋（有人在里面）标为 worn，不要标 shoe。\n"
+            "1. items：散乱摆放在【地面上】、需要整理的小物件。类别只能是：\n"
+            "   trash(垃圾碎屑)、cup(杯子/饮料罐/易拉罐)、food(食物/水果)、"
+            "shoe(鞋靴)、pillow(抱枕靠垫,含圆柱形颈枕——长度超过 30cm 的细长圆柱是颈枕不是杯子)。\n"
+            "   识别要点：\n"
+            "   - 鞋的形状多样（靴子/运动鞋/圆头拖鞋），不要因为形状是圆形就判成食物；\n"
+            "     紧挨在一起的一对小物体很可能是同一双鞋的两只。\n"
+            "   - 银色/白色圆柱小件通常是易拉罐，按 cup 算。\n"
+            "   - 穿在人脚上的鞋（有人在里面）标为 worn，不要标 shoe。\n"
+            "   - 画面里每一件散落的地面小物件都必须归类，认不出的标 other，不要遗漏。\n"
             "2. containers：可放置物品的目标家具。类型只能是：\n"
-            "   trash_bin(垃圾桶)、table(茶几/餐桌)、sofa(沙发)、shoe_cabinet(鞋柜/边柜)。\n"
-            "当前帧物体元数据（size_cm 是包围盒长宽高，loc 是世界坐标）：\n"
+            "   trash_bin(垃圾桶,通常是黑色小方箱)、table(茶几/餐桌)、sofa(沙发)、"
+            "shoe_cabinet(鞋柜/边柜)。\n"
+            "当前帧物体元数据（size_cm 是包围盒长宽高，loc 是世界坐标，单位 cm）：\n"
             f"{json.dumps(compact, ensure_ascii=False)}\n"
-            "要求：家具本身、已摆放整齐的物品、墙上装饰都不要列入 items；"
-            "垃圾桶虽然不大但它是 container 不是 trash。\n"
+            "要求：家具本身、沙发上已摆放整齐的靠枕、墙上装饰不要列入 items。\n"
             "重要：不要思考过程，回答的第一个字符必须是 {{，格式如 "
             '{{"items": {{"36": "trash", "32": "cup"}}, "containers": {{"18": "trash_bin", "15": "table"}}}}；'
             "没有则用空字典。"
@@ -604,34 +619,49 @@ class TidyroomAgent(VLMAgent):
         return out
 
     def _harvest_vlm(self, block: bool, timeout: float = 0.0) -> bool:
-        """收割已完成的 VLM future，合并到类别/容器票。返回是否有新信息。
+        """收割 VLM future：结果合并 / 失败换帧重发一次 / 全挂则清空不再等。
 
-        block=True 时最多只等第一个未完成的 future（其余只收已完成的）。
+        VLM 可用性强化（2026-09-15）：deepseek 间歇全挂（test R1/R3 整轮
+        零贡献）——失败帧换另一帧重发（同请求重试已证明无效），重发仍
+        失败计入 dead；全部帧 dead 时清空 futures，主循环立即转二轮扫描
+        收尾，不再空等烧时间分。
         """
         if not self._vlm_futs:
             return False
         changed = False
-        pending: list[Future] = []
+        pending: list[tuple[int, Future]] = []
         waited = False
-        for fut in self._vlm_futs:
+        for seq, fut in self._vlm_futs:
             try:
                 if not fut.done():
                     if not (block and not waited):
-                        pending.append(fut)
+                        pending.append((seq, fut))
                         continue
                     waited = True
                     budget = self._VLM_BUDGET - (time.time() - self._vlm_started)
                     if budget <= 0:
-                        pending.append(fut)
+                        pending.append((seq, fut))
                         continue
                     items, conts = fut.result(timeout=min(timeout, max(budget, 1.0)))
                 else:
                     items, conts = fut.result(timeout=0.1)
             except FuturesTimeout:
-                pending.append(fut)
+                pending.append((seq, fut))
                 continue
             except Exception as exc:  # noqa: BLE001
-                logger.warning("VLM 帧失败: {} {}", type(exc).__name__, exc)
+                logger.warning("VLM 帧异常: {} {}", type(exc).__name__, exc)
+                items, conts = {}, {}
+            if not items and not conts:
+                # 空结果 = 挂帧：未重发过的换帧重发一次；重发过则计 dead
+                if seq not in self._vlm_retried:
+                    self._vlm_retried.add(seq)
+                    frame = self._vlm_frames.get(seq)
+                    if frame:
+                        logger.info("VLM 帧 {} 失败，换帧重发", seq)
+                        self._vlm_futs_pending_resubmit.append(frame)
+                else:
+                    self._vlm_dead += 1
+                    logger.warning("VLM 帧 {} 重发仍失败 (dead={})", seq, self._vlm_dead)
                 continue
             for oid, cat in items.items():
                 if oid in self._done_oids or cat in ("other", "worn"):
@@ -653,14 +683,65 @@ class TidyroomAgent(VLMAgent):
                     self._container_votes.setdefault(oid, Counter())[ctype] += 1
                     changed = True
         self._vlm_futs = pending
+        # 换帧重发（失败帧的全部重试都在后台，不阻塞主流程）
+        while self._vlm_futs_pending_resubmit:
+            frame = self._vlm_futs_pending_resubmit.pop(0)
+            self._submit_vlm_frame(frame["image"], frame["objects"])
+            # 重发的 seq 尚未标记 retried（换的是新 seq，新帧失败会再判）
+            self._vlm_retried.add(self._vlm_seq)
+        # 全挂检测：所有已提交帧都 dead → 放弃等待
+        if self._vlm_dead >= self._vlm_seq and self._vlm_seq > 0:
+            logger.warning("VLM 全部帧失败（{}/{}），放弃等待", self._vlm_dead, self._vlm_seq)
+            self._vlm_futs = []
+            return changed
         if changed:
             self._resolve_containers()
             self._rebuild_queue()
         return changed
 
-    # ------------------------------------------------------------------ #
-    # 规则分类兜底（先行）
-    # ------------------------------------------------------------------ #
+    def _pair_shoes(self) -> None:
+        """鞋成对启发：紧邻确定鞋（<50cm）且尺寸相近（±12cm）的可搬物体，
+        即使 shape 不是 boot/shoe 也按鞋处理。
+
+        依据（2026-09-15 test R4 实测）：test 资产的鞋形态多样，圆头拖鞋
+        shape=round 被规则误判 food 放错容器；而同一双的两只总是紧贴
+        （实测相距 9~11cm），成对证据比单一 shape 可靠。
+        """
+        shoes = [(oid, self._world[oid]) for oid, c in self._categories.items()
+                 if c == "shoe" and oid in self._world]
+        if not shoes:
+            return
+        for oid, obj in self._world.items():
+            if oid in self._done_oids or self._categories.get(oid) == "shoe":
+                continue
+            if self._is_point(obj) or self._too_high(obj):
+                continue
+            dx, dy, dz = self._dims(obj)
+            if not (self._MIN_DIM <= min(dx, dy, dz) and max(dx, dy, dz) <= self._MAX_ITEM_DIM):
+                continue
+            loc = obj.get("place_location") or {}
+            try:
+                px, py = float(loc.get("X", 0)), float(loc.get("Y", 0))
+            except (TypeError, ValueError):
+                continue
+            for soid, sobj in shoes:
+                sloc = sobj.get("place_location") or {}
+                try:
+                    sx_, sy_ = float(sloc.get("X", 0)), float(sloc.get("Y", 0))
+                except (TypeError, ValueError):
+                    continue
+                if (px - sx_) ** 2 + (py - sy_) ** 2 > self._PAIR_DIST ** 2:
+                    continue
+                sdx, sdy, sdz = self._dims(sobj)
+                if (abs(dx - sdx) <= self._PAIR_DIM_TOL
+                        and abs(dy - sdy) <= self._PAIR_DIM_TOL
+                        and abs(dz - sdz) <= self._PAIR_DIM_TOL):
+                    old = self._categories.get(oid)
+                    self._categories[oid] = "shoe"
+                    self._rule_cats.add(oid)
+                    logger.info("鞋成对启发: {} ({}) 紧邻鞋 {} 且尺寸相近 → 改判 shoe",
+                                oid, old, soid)
+                    break
 
     def _apply_rule_categories(self) -> None:
         for oid, obj in self._world.items():
@@ -771,6 +852,7 @@ class TidyroomAgent(VLMAgent):
     # ------------------------------------------------------------------ #
 
     def _rebuild_queue(self) -> None:
+        self._pair_shoes()  # 鞋成对启发（2026-09-15 R4：圆状鞋 33 被误判 food 的修正）
         queue: list[dict] = []
         for oid, cat in self._categories.items():
             if oid in self._done_oids:
