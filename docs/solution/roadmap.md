@@ -292,6 +292,24 @@ tongsim client 的 event loop，导致后续长 RPC 全挂（"Event loop is clos
 
 
 
+### 2026-09-15 凌晨收官：jigsaw 整合入包（train 88.17）+ tidyroom 优化版 test 拉通 + 重打包
+
+**jigsaw**：队友提供 `jigsaw_skill.py`（1564 行，三层降级：几何推演格点/空缺
+恢复 → VLM 主 + CV 兜底匹配 → 执行校验补放；含 09-14 联调实测结论：
+拼图专用抓取 RPC 未实现、一步式放置不被评测认可须两步式 force_locate、
+assign=fallback 顺序放最快）。整合为 `src/cqairace/jigsaw_skill.py` +
+薄壳 `jigsaw_agent.py` + `temp/run_jigsaw.sh`。**train 一次通过 88.17**
+（基线 27.2）；test 一次通过（3 块全放对，新题库布局）。
+
+**tidyroom 识别三短板修正后 test 复测**（R5-R7，每轮全栈重启+行车记录仪）：
+placed 4/3/2（均值 3.0，优化前 R1-R4 均值 1.75）——鞋成对启发生效
+（R5 两只圆状鞋正确进鞋柜）、prompt v2+VLM 换帧重发生效。R5 为最优 bin。
+回归 train 78.54（新场景 5/5 全对，含可抓枕→沙发 ✓）。
+
+**提交包**：`temp/baseline_records/submission_20260915_am/`——
+raven(09-14) + counting(09-14) + npc(09-14) + **tidyroom(R5)** +
+**jigsaw(新)** 五任务齐全。预估总分 ~60 → **~70+**。
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
@@ -305,6 +323,8 @@ tongsim client 的 event loop，导致后续长 RPC 全挂（"Event loop is clos
 | 2026-09-14 | tidyroom | 自研三阶段 agent（扫描+VLM 并行分类+零 VLM 执行，拉黑机制） | temp/baseline_records/tidyroom/ + temp/p4_tidyroom/trace.jsonl | **train 32.0**（基线 16.0）；test 待跑 |
 | 2026-09-14 | tidyroom | 判卷机制逆向（exe 字符串）+ v3 放置链（move_to_object+put_down_sth 强制入体） | temp/baseline_records/tidyroom/eval_res.run12_48.json | **train 48.0**；test 待跑 |
 | 2026-09-15 | tidyroom | 人工导览校准（TOUR 模式）+ 颈枕尺寸判据（细长圆柱≥35cm→pillow） | temp/baseline_records/tidyroom/eval_res.run14_80.json | **train 80.88**（反超大部队 79）；test 待跑 |
+| 2026-09-15 | tidyroom | 鞋成对启发+VLM 换帧重发+prompt v2 → test R5-R7 复测 | temp/p4_tidyroom/test_sessions/ + test5_7.log | test placed 均值 1.75→3.0；train 回归 78.54 |
+| 2026-09-15 | jigsaw | 队友技能模块整合（jigsaw_skill+薄壳 agent）train/test 各一轮 | temp/baseline_records/jigsaw_agent_*.log | **train 88.17**（基线 27.2）；test 通过 |
 
 **事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator
 中断、UE 客户端死亡；数据零损失（仓库在 GitHub、归档随盘恢复），重启 UE 后干净重跑成功。
