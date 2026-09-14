@@ -53,6 +53,8 @@ TRACE_DIR = _REPO_ROOT / "temp" / "p4_tidyroom"
 _DRY_RUN = os.environ.get("TIDYROOM_DRY_RUN", "") not in ("", "0", "false")
 # 单件实验开关：只搬指定 object_id（逗号分隔），用于校准判卷几何/分值
 _ONLY_OIDS = {s for s in os.environ.get("TIDYROOM_ONLY_OID", "").split(",") if s}
+# 导览模式：扫描后逐件走到物品面前停留（人工在 UE 里核对物品位置/类型）
+_TOUR = os.environ.get("TIDYROOM_TOUR", "") not in ("", "0", "false")
 
 # VLM 输出词表归一
 _ITEM_ALIASES = {
@@ -143,11 +145,34 @@ class TidyroomAgent(VLMAgent):
     # 主入口
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # 导览模式：走到每件物品面前供人工核对
+    # ------------------------------------------------------------------ #
+
+    def _tour(self) -> None:
+        self._scan_rounds(max_rounds=1, submit_vlm=False)
+        self._apply_rule_categories()
+        self._rebuild_queue()
+        logger.info("TOUR: 共 {} 件候选, 开始逐件导览", len(self._queue))
+        for i, t in enumerate(self._queue, 1):
+            oid = t["oid"]
+            o = self._world[oid]
+            loc = o.get("place_location") or {}
+            logger.info("TOUR [{}/{}] {} 判定={} 位置=({},{},{})",
+                        i, len(self._queue), oid, t["cat"],
+                        loc.get("X"), loc.get("Y"), loc.get("Z"))
+            self._call_with_timeout(self.tongsim.move_to_object, self.character_id,
+                                    oid, default=None)
+            time.sleep(4)
+        logger.info("TOUR 结束")
+
     def run_step(self, subject, task_response: dict[str, Any]) -> dict[str, Any]:
         if self._t0 is None:
             self._t0 = time.time()
         try:
-            if _DRY_RUN:
+            if _TOUR:
+                self._tour()
+            elif _DRY_RUN:
                 logger.info("DRY RUN：仅统计感知，不搬运")
                 self._scan_rounds(max_rounds=1, submit_vlm=False)
             else:
@@ -264,8 +289,8 @@ class TidyroomAgent(VLMAgent):
             "编号与下方元数据的 object_id 一一对应）。场景是客厅+玄关，任务是整理房间。\n"
             "请把当前画面里可见的物体分成两类：\n"
             "1. items：散乱摆放、需要整理的小物件。类别只能是：\n"
-            "   trash(垃圾碎屑)、cup(杯子/罐)、food(食物/水果)、shoe(散落在地上的鞋靴)、"
-            "pillow(抱枕靠垫)。\n"
+            "   trash(垃圾碎屑)、cup(杯子/饮料罐)、food(食物/水果)、shoe(散落在地上的鞋靴)、"
+            "pillow(抱枕靠垫,含圆柱形颈枕——长度超过 30cm 的细长圆柱是颈枕不是杯子)。\n"
             "   特别注意：穿在人脚上的鞋（有人在里面）标为 worn，不要标 shoe。\n"
             "2. containers：可放置物品的目标家具。类型只能是：\n"
             "   trash_bin(垃圾桶)、table(茶几/餐桌)、sofa(沙发)、shoe_cabinet(鞋柜/边柜)。\n"
@@ -407,7 +432,9 @@ class TidyroomAgent(VLMAgent):
         if shape in ("boot", "shoe"):
             return "shoe"
         if shape == "cylinder":
-            return "cup"
+            # 尺寸判据（2026-09-15 导览实测）：≥35cm 的细长圆柱是颈枕/抱枕
+            # （45×16cm 黑圆柱颈枕曾被误判 cup 塞进茶几），罐/杯都是短圆柱
+            return "pillow" if max(self._dims(obj)) >= 35 else "cup"
         if shape == "irregular":
             return "trash"
         if shape == "round":
