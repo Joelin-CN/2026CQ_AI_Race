@@ -17,6 +17,7 @@ v1 教训（2026-09-14 train 六轮实测，见 temp/p4_tidyroom/ 与 v2-notes �
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -48,6 +49,7 @@ from arenaagent.vlm_agent.json_parsor import extract_last_json_from_text  # noqa
 from arenaagent.vlm_agent.vlm_agent import VLMAgent, VLMAgentCfg  # noqa: E402
 
 TRACE_DIR = _REPO_ROOT / "temp" / "p4_tidyroom"
+SESSIONS_DIR = _REPO_ROOT / "temp" / "p4_tidyroom" / "test_sessions"
 
 # no-op 实验开关：只扫描规划不搬运，用于校准"初始场景天然完成度"
 _DRY_RUN = os.environ.get("TIDYROOM_DRY_RUN", "") not in ("", "0", "false")
@@ -61,6 +63,10 @@ _SCOUT = os.environ.get("TIDYROOM_SCOUT", "")
 _ENUM_SHOE = os.environ.get("TIDYROOM_ENUM_SHOE", "") not in ("", "0", "false")
 # 枕枚举实验：对矩形枕(13)穷举接口 + 物理挤动推向沙发（42cm 缺口）
 _ENUM_PILLOW = os.environ.get("TIDYROOM_ENUM_PILLOW", "") not in ("", "0", "false")
+# 行车记录仪：感知复合图落盘（事后回放小人第一视角，test 诊断用）
+_SAVE_FRAMES = os.environ.get("TIDYROOM_SAVE_FRAMES", "") not in ("", "0", "false")
+# 轮次标签：编入本轮目录名（如 test_r4 / train_a；缺省用纯时间戳）
+_RUN_TAG = os.environ.get("TIDYROOM_RUN_TAG", "")
 
 # VLM 输出词表归一
 _ITEM_ALIASES = {
@@ -146,6 +152,7 @@ class TidyroomAgent(VLMAgent):
         self._blacklist: set[str] = set()
         self._placed = 0
         self._gave_up = 0
+        self._session_dir: Path | None = None  # 本轮档案目录(首次落盘时创建)
 
     # ------------------------------------------------------------------ #
     # 主入口
@@ -391,8 +398,27 @@ class TidyroomAgent(VLMAgent):
         logger.info(summary)
         self._trace("finish", summary=summary, placed=self._placed,
                     blacklist=sorted(self._blacklist), categories=self._categories)
+        self._save_session_summary()
         return self._do_action({"action": "finish_task", "think": summary,
                                 "output": self._placed})
+
+    def _save_session_summary(self) -> None:
+        """本轮档案汇总：与感知图同目录的 session_summary.json。"""
+        try:
+            if self._session_dir is not None:
+                self._session_dir.mkdir(parents=True, exist_ok=True)
+                (self._session_dir / "session_summary.json").write_text(
+                    json.dumps({
+                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "tag": _RUN_TAG,
+                        "world_objects": len(self._world),
+                        "placed": self._placed,
+                        "gave_up": self._gave_up,
+                        "blacklist": sorted(self._blacklist),
+                        "categories": self._categories,
+                    }, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------ #
     # 流水线主循环
@@ -437,6 +463,24 @@ class TidyroomAgent(VLMAgent):
     # 扫描（每帧即时异步发 VLM）
     # ------------------------------------------------------------------ #
 
+    def _save_frame(self, tag: str, b64: str) -> None:
+        """感知图落盘：temp/p4_tidyroom/test_sessions/{时间戳[_标签]}/frame_*.jpg。
+
+        每轮独立目录（目录规范：test/train 逐轮归档，含 meta 汇总）。
+        """
+        if not _SAVE_FRAMES or not b64:
+            return
+        try:
+            if self._session_dir is None:
+                name = time.strftime("%Y%m%d_%H%M%S")
+                if _RUN_TAG:
+                    name = f"{name}_{_RUN_TAG}"
+                self._session_dir = SESSIONS_DIR / name
+            self._session_dir.mkdir(parents=True, exist_ok=True)
+            (self._session_dir / f"frame_{tag}.jpg").write_bytes(base64.b64decode(b64))
+        except Exception:  # noqa: BLE001  落盘失败不影响任务
+            pass
+
     def _scan_rounds(self, max_rounds: int, submit_vlm: bool) -> None:
         while self._scan_round < max_rounds:
             self._scan_round += 1
@@ -447,6 +491,7 @@ class TidyroomAgent(VLMAgent):
                     1280, 720, default={},
                 )
                 objects = p.get("objects", []) or []
+                self._save_frame(f"scan_r{self._scan_round}_{i}", p.get("image", ""))
                 for obj in objects:
                     oid = str(obj.get("object_id", ""))
                     if not oid:
@@ -846,6 +891,7 @@ class TidyroomAgent(VLMAgent):
             self.tongsim.acquire_first_person_perception, self.character_id,
             1280, 720, default={},
         )
+        self._save_frame(f"confirm_{oid}", p.get("image", ""))
         if not p.get("image"):
             logger.warning("确认感知失败（UE 卡顿?），按未确认处理")
             return False
