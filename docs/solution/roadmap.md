@@ -410,3 +410,11 @@ uv run arenaagent --agent_name preliminary_baseline_agent --config config.toml `
 
 运维备忘：Agent 报错必须重启赛题系统（Ctrl+C）；切换任务客户端不用重启；
 客户端启动 = 双击 `客户端\Windows\Windows\run.bat`。
+
+**test R13 bin 替换定案（2026-09-16 01:45）**：用户复盘行车记录仪确认六件
+全合法（32 碎屑→桶、33 杯→桌、34 枕→沙发、35 食→桌、36 垃圾→桶、37
+杯→桌，36/37 到场确认翻正）。按"placed≥6 且更快"规矩：R13（6 件/~95s）
+替换 R9（6 件/116s）入提交包。`submission_20260916_am/` 已建：五 bin 齐
+（tidyroom=R13，其余沿用 09-15pm 最优），`package-results` 重打包成功
+（SHA-256 前 16 位 47e7e700821aa729），待上传官网。预估 R13≈81~82 分
+（满完成度 80+时间分 ~1.5），待官网出分校验。
