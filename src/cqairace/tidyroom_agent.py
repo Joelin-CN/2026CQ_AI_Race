@@ -454,8 +454,10 @@ class TidyroomAgent(VLMAgent):
                 self._execute_one()
                 continue
 
-            # 队列空：等 VLM 新结果（仅首轮扫描后值得等）→ 二轮扫描 → 收工
-            if self._vlm_futs and self._scan_round < self._SCAN_ROUNDS:
+            # 队列空：等 VLM 新结果（仅当还有未处理的可搬候选——全处理完
+            # 时 VLM 无增量可贡献，等待纯属烧时间分，R8 实测拖尾 3'50"）
+            if self._vlm_futs and self._scan_round < self._SCAN_ROUNDS \
+                    and not self._all_candidates_done():
                 self._harvest_vlm(block=True, timeout=10.0)
                 continue
             if self._scan_round < self._SCAN_ROUNDS:
@@ -467,6 +469,18 @@ class TidyroomAgent(VLMAgent):
             # 二轮扫描后不再等 VLM（实测新物体为 0，期望收益≈0，白耗时间分）
             self._harvest_vlm(block=False)
             break
+
+    def _all_candidates_done(self) -> bool:
+        """world 中所有尺寸合格的可搬候选是否都已处理（placed/拉黑/放弃）。"""
+        for oid, obj in self._world.items():
+            if oid in self._done_oids:
+                continue
+            if self._is_point(obj) or self._too_high(obj):
+                continue
+            d = self._dims(obj)
+            if min(d) >= self._MIN_DIM and max(d) <= self._MAX_ITEM_DIM:
+                return False
+        return True
 
     # ------------------------------------------------------------------ #
     # 扫描（每帧即时异步发 VLM）
