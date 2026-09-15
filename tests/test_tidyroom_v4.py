@@ -445,3 +445,17 @@ def test_furniture_thickness_collision_guard():
     assert "21" not in a._categories       # Unknown 椅：大件先验被厚度守卫拦下
     assert "22" not in a._categories       # 块状 pillow 形：同拦
     assert a._categories["32"] == "pillow"  # 91×44×86 真厚枕通过
+
+
+def test_sandal_is_shoe_and_big_cylinder_grounded():
+    # R27 教训：29cm 凉鞋词汇缺失落空带；101cm 绿植 cylinder 被标 pillow
+    sandal = obj("52", shape="sandal", dz=12, dx=29, dy=12)
+    sandal["color"] = "blue"
+    plant = obj("11", shape="cylinder", dz=101, dx=86, dy=79)
+    plant["color"] = "green"
+    neck = obj("33", shape="cylinder", dz=15, dx=45, dy=16)  # 颈枕仍 pillow
+    a = v4_agent([sandal, plant, neck])
+    a._apply_rule_categories()
+    assert a._categories["52"] == "shoe"       # 凉鞋直判鞋柜
+    assert "11" not in a._categories           # 101cm 绿植不判
+    assert a._categories["33"] == "pillow"     # 45cm 颈枕不受影响

@@ -1142,8 +1142,14 @@ class TidyroomAgent(VLMAgent):
             return "shoe"
         if shape == "cylinder":
             # 尺寸判据（2026-09-15 导览实测）：≥35cm 的细长圆柱是颈枕/抱枕
-            # （45×16cm 黑圆柱颈枕曾被误判 cup 塞进茶几），罐/杯都是短圆柱
-            return "pillow" if max(self._dims(obj)) >= 35 else "cup"
+            # （45×16cm 黑圆柱颈枕曾被误判 cup 塞进茶几），罐/杯都是短圆柱。
+            # R27 教训：101cm 大绿植(cylinder)曾落入本分支标 pillow——
+            # 补可搬区间与厚度守卫
+            if max(self._dims(obj)) >= 35:
+                return "pillow" if (max(self._dims(obj)) < self._MAX_ITEM_DIM
+                                    and min(self._dims(obj)) < self._FURNITURE_MIN_DIM) \
+                    else None
+            return "cup"
         if shape == "irregular":
             return "trash"
         if shape == "round":
@@ -1157,6 +1163,10 @@ class TidyroomAgent(VLMAgent):
             return "food" if max(self._dims(obj)) >= self._TINY_DIM else "trash"
         if shape in ("ring", "slice"):
             return "food"
+        if shape in ("sandal", "slipper", "loafer"):
+            # R27-52 教训：blue/sandal 29cm 凉鞋，词汇缺失落 20~40 空带被
+            # 确认成 pillow(守卫拦成 trash)——鞋类尺寸恰在空带，须直判
+            return "shoe"
         # shape 覆盖缺口补齐（§7-18：R11 的 36 号黑枕 shape=pillow 无分支，
         # VLM 全挂轮漏分类）：pillow 须 ≥_PILLOW_MIN_DIM（小 pillow 形件
         # 走末尾极小兜底进垃圾桶）

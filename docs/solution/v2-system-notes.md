@@ -516,3 +516,13 @@
     物（含 shape=Unknown 的椅子/脚凳）不进 pillow 判定与队列入队，
     与 shape=chair 拉黑双保险。首版阈值 50 被自己的测试抓出误杀
     （min 53/56 的已确认枕），修正为 58——阈值必须有全量数据支撑。
+40. **R27 复盘定案（2026-09-16）**：placed 4（32 蓝圆片 10cm→桶、
+    34 白 irregular 17cm→桶、33 blue/box 42×56×62→大件先验 pillow→沙发
+    [真伪待复盘 took_33]、52 见下）。两修复：
+    - **sandal→shoe 词汇直判**：R27-52 blue/sandal 12×29×12 凉鞋，
+      词汇缺失致 29cm 落 20~40 空带→确认 pillow(错)→守卫拦成 trash
+      (也错)进桶——正解鞋柜。鞋类尺寸恰在空带，只能靠词汇（顺带
+      slipper/loafer）。守卫是"最后防线"不是"正确性来源"。
+    - **cylinder≥35→pillow 分支补双守卫**：R27-11 大绿植
+      （green/cylinder 86×79×101）被老分支标 pillow（101>100 队列
+      兜底未入队，纯 cats 污染）——补 max<100 与 min<58。
