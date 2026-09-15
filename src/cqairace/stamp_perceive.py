@@ -75,6 +75,8 @@ PROMPT_CONFIRM_TMPL = (
     "元数据：{color}/{shape}/{size}cm。\n"
     "类别白名单：trash/cup/food/shoe/pillow（易拉罐算 cup；"
     "≥30cm细长圆柱是颈枕算 pillow；穿在人脚上的鞋不算）。\n"
+    "尺寸硬约束：pillow 只能是 ≥30cm 的抱枕/靠垫/颈枕——比元数据尺寸"
+    "小的物件绝不判 pillow；<20cm 且不像杯罐/水果的小物优先 trash。\n"
     '只输出 {{"{oid}":"..."}}。'
 )
 

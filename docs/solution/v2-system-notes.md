@@ -448,3 +448,21 @@
       placed 6（+1 件）；R22 首轮仅 1 件→补盲扫挖出 57/58/59 三件
       全对 placed 4（+3 件）。补盲扫成本 ~14s/轮，换回 13 分/件，
       稳赚。R22 的 34 确认无结论放弃（复盘待看）。bins 21/22 已备份。
+33. **pillow 尺寸界定与极小件兜底（2026-09-16，R22 用户复盘定策）**：
+    - 界定依据（历史 9 轮普查）：真枕 max dim 全部 ≥38cm（最细颈枕
+      45×16）；误判件全部 ≤15cm（R22-57 red drumstick 11cm 鸡腿、
+      R14-33/R19-34 brown rock 10cm 石块、R18-34/R20-36 小 oval 9~15cm
+      碎物）——空带 16~38cm，取下限 **30cm**。
+    - 修复四件：①`_PILLOW_MIN_DIM=30`：规则层 pillow 分支（shape=
+      pillow、beige/white rect）加下限；②确认层确定性守卫：VLM 确认
+      pillow 但 max<30 → 改判 trash 进桶（不依赖 prompt 自觉）；③
+      极小件兜底：无形状规则命中的 max<20cm → trash（用户定策：极小
+      进垃圾桶；罐/果等形状规则在前不受影响）；④shape 词汇直判：
+      rock→trash、drumstick→food(≥20)/trash(<20)；prompt C 加尺寸
+      硬约束文案。
+    - **R23 实机验证**：守卫两连击——34(16cm)/33(26cm) 被 VLM 确认为
+      pillow 均被拦截改判 trash 进桶；placed 5、~65s、补盲扫 +4 物体
+      无新件。33(26cm) 落空带偏大侧，真伪待复盘（frame_confirm_cls_
+      33.jpg）。
+    - **历史轮完成度修正**（本 bug 曾每轮偷走一件）：R14 实为 2/3、
+      R18 实为 2/5、R19 实为 3/5、R20 实为 4/5。

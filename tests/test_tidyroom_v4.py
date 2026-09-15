@@ -322,3 +322,40 @@ def test_flat_item_not_point_filtered():
     assert not a._is_point(flat) and a._is_point(point)
     a._apply_rule_categories()
     assert "33" in a._categories or "33" in a._ambiguous  # 进入识别流程
+
+
+def test_pillow_size_floor_and_tiny_fallback():
+    # R22-57 red drumstick 11×10×6 / R14-33 rock 10×6×4 曾被误判 pillow
+    drumstick = obj("57", shape="drumstick", dz=6, dx=11, dy=10)
+    drumstick["color"] = "red"
+    rock = obj("33", shape="rock", dz=4, dx=10, dy=6)
+    rock["color"] = "brown"
+    small_oval = obj("34", shape="oval", dz=7, dx=9, dy=9)
+    small_oval["color"] = "brown"
+    neck_pillow = obj("32", shape="cylinder", dz=15, dx=45, dy=16)  # 颈枕
+    real_pillow = obj("36", shape="pillow", dz=35, dx=39, dy=44)
+    a = v4_agent([drumstick, rock, small_oval, neck_pillow, real_pillow])
+    a._apply_rule_categories()
+    c = a._categories
+    assert c["57"] == "trash"      # 极小 drumstick → 垃圾桶
+    assert c["33"] == "trash"      # rock → 垃圾
+    assert c["34"] == "trash"      # 极小 oval 兜底 → 垃圾
+    assert c["32"] == "pillow"     # 45cm 颈枕不受影响
+    assert c["36"] == "pillow"     # 39cm 真枕通过下限
+
+
+def test_small_pillow_shape_not_pillow():
+    # shape=pillow 但只有 15cm → 不是枕，走极小兜底 trash
+    mini = obj("20", shape="pillow", dz=6, dx=15, dy=14)
+    a = v4_agent([mini])
+    a._apply_rule_categories()
+    assert a._categories["20"] == "trash"
+
+
+def test_can_rul_still_works_for_tiny_cylinder():
+    # 极小兜底不得误伤：短圆柱罐（R9 33 号 7.6cm 红罐）仍是 cup
+    can = obj("33", shape="cylinder", dz=8, dx=7, dy=7)
+    can["color"] = "red"
+    a = v4_agent([can])
+    a._apply_rule_categories()
+    assert a._categories["33"] == "cup"

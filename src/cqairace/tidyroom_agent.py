@@ -137,6 +137,12 @@ class TidyroomAgent(VLMAgent):
     _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
     _MIN_DIM = 1.0           # 排除点状 AABB（墙角标记 min=0 精确退化；
                               # 2→1：R17-33 薄片物品 10×10×1 曾被误杀）
+    _PILLOW_MIN_DIM = 30.0   # pillow 尺寸下限（R14/18/19/20/22 复盘：真枕
+                              # max≥38cm（最细颈枕 45×16），rock 10cm/drumstick
+                              # 11cm/小 oval ≤15cm 曾被误判 pillow 进沙发）
+    _TINY_DIM = 20.0         # 极小件阈值：无形状规则命中时按 trash 兜底
+                              # （用户定策：极小件进垃圾桶；cylinder 罐/round
+                              # 果等形状规则在前不受影响）
     _MAX_BASE_Z = 30.0       # 候选基座高度上限（place_location Z）：出题生成器
                               # 保证可搬物品"撒地面"（历轮实测 z0=0~5cm），收紧自
                               # 150cm 一刀排除高处背景构件（用户复盘点名 9/26/27/
@@ -1129,16 +1135,25 @@ class TidyroomAgent(VLMAgent):
             return "trash"
         if shape == "round":
             return "food"
+        # 词汇直判（R22-57 red drumstick=鸡腿、R14/19-34 brown rock=石块）
+        if shape == "rock":
+            return "trash"
+        if shape == "drumstick":
+            return "food" if max(self._dims(obj)) >= self._TINY_DIM else "trash"
         # shape 覆盖缺口补齐（§7-18：R11 的 36 号黑枕 shape=pillow 无分支，
-        # VLM 全挂轮漏分类）：pillow 直判；小件非黑 box 按包装盒判 trash
-        # （黑色 box 排除——垃圾桶本体即 black box，防止自搬自）
-        if shape == "pillow":
+        # VLM 全挂轮漏分类）：pillow 须 ≥_PILLOW_MIN_DIM（小 pillow 形件
+        # 走末尾极小兜底进垃圾桶）
+        if shape == "pillow" and max(self._dims(obj)) >= self._PILLOW_MIN_DIM:
             return "pillow"
         if shape == "box" and color != "black" and max(self._dims(obj)) <= 45:
             return "trash"
         if shape == "rectangle" and color in ("beige", "white") \
-                and max(self._dims(obj)) < self._MAX_ITEM_DIM:
+                and self._PILLOW_MIN_DIM <= max(self._dims(obj)) < self._MAX_ITEM_DIM:
             return "pillow"
+        # 极小件兜底（用户定策：无形状特征的 <20cm 小物进垃圾桶——
+        # rock/drumstick 小件、小 oval 碎物；罐/果等形状规则已在前命中）
+        if max(self._dims(obj)) < self._TINY_DIM:
+            return "trash"
         return None
 
     # ------------------------------------------------------------------ #
@@ -1472,6 +1487,14 @@ class TidyroomAgent(VLMAgent):
             cat = _sp.parse_classification(self._direct_invoke(parts)).get(oid)
             sec = round(time.time() - t0, 1)
             if cat and cat != "other":
+                # 尺寸守卫（R22-57 教训：11cm 鸡腿被 VLM 确认成 pillow）：
+                # pillow 须 ≥30cm，违者按极小件改判 trash
+                obj = self._world.get(oid) or {}
+                if cat == "pillow" and max(self._dims(obj)) < self._PILLOW_MIN_DIM:
+                    logger.info("确认 {} → {} 但 max dim {:.0f}cm < {:.0f}，"
+                                "改判 trash（进桶）", oid, cat,
+                                max(self._dims(obj)), self._PILLOW_MIN_DIM)
+                    cat = "trash"
                 self._item_votes.setdefault(oid, Counter())[cat] += self._CONFIRM_W
                 self._item_votes_n.setdefault(oid, Counter())[cat] += 1
                 top = self._weighted_top(oid)
