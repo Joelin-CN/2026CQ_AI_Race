@@ -484,3 +484,18 @@ def test_paper_scrap_flat_object_to_trash():
     a._ambiguous = set()
     a._rebuild_queue()
     assert {"59", "61"} <= {t["oid"] for t in a._queue}   # 纸屑入队进桶
+
+
+def test_item_on_furniture_top_not_high_filtered():
+    # R30-32 凉鞋初始生成在茶几面(locZ=45)曾被 _MAX_BASE_Z=30 误杀；
+    # 家具顶面(桌面45/餐桌79/沙发99)是合法初始位，背景构件最低129
+    on_table = obj("32", shape="sandal", dz=11, dx=29, dy=11)
+    on_table["color"] = "blue"
+    on_table["place_location"]["Z"] = 45
+    wall_box = obj("58", shape="box", dz=32, dx=56, dy=44)
+    wall_box["place_location"]["Z"] = 129
+    a = v4_agent([on_table, wall_box])
+    assert not a._too_high(on_table) and a._too_high(wall_box)
+    a._apply_rule_categories()
+    assert a._categories["32"] == "shoe"      # 凉鞋上茶几 → 鞋柜
+    assert "58" not in a._categories          # 挂墙盒仍排除
