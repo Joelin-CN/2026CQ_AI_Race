@@ -150,6 +150,11 @@ class TidyroomAgent(VLMAgent):
                               # trash 是错的——历史可搬大件 max≥40 只有 pillow，
                               # ring 31/靴 25/罐 34 全在下方）：无形状规则命中
                               # 且 max≥40 → pillow
+    _FURNITURE_MIN_DIM = 58.0  # 家具级厚度碰撞判定（用户提议）：餐椅实测
+                              # 61×61×80/86×86×80（min=61~80），已确认方枕
+                              # min 最高 56（R26-33 57×57×56、R25-33 65×63×53）
+                              # ——min≥58 视为块状家具，不参与 pillow 判定
+                              # 与入队（防 Unknown 形状的椅子/脚凳混进大件先验）
     _MAX_BASE_Z = 30.0       # 候选基座高度上限（place_location Z）：出题生成器
                               # 保证可搬物品"撒地面"（历轮实测 z0=0~5cm），收紧自
                               # 150cm 一刀排除高处背景构件（用户复盘点名 9/26/27/
@@ -1155,12 +1160,14 @@ class TidyroomAgent(VLMAgent):
         # shape 覆盖缺口补齐（§7-18：R11 的 36 号黑枕 shape=pillow 无分支，
         # VLM 全挂轮漏分类）：pillow 须 ≥_PILLOW_MIN_DIM（小 pillow 形件
         # 走末尾极小兜底进垃圾桶）
-        if shape == "pillow" and max(self._dims(obj)) >= self._PILLOW_MIN_DIM:
+        if shape == "pillow" and max(self._dims(obj)) >= self._PILLOW_MIN_DIM \
+                and min(self._dims(obj)) < self._FURNITURE_MIN_DIM:
             return "pillow"
         if shape == "box" and color != "black" and max(self._dims(obj)) <= 45:
             return "trash"
         if shape == "rectangle" and color in ("beige", "white") \
-                and self._PILLOW_MIN_DIM <= max(self._dims(obj)) < self._MAX_ITEM_DIM:
+                and self._PILLOW_MIN_DIM <= max(self._dims(obj)) < self._MAX_ITEM_DIM \
+                and min(self._dims(obj)) < self._FURNITURE_MIN_DIM:
             return "pillow"
         # 极小件兜底（用户定策：无形状特征的 <20cm 小物进垃圾桶——
         # rock/drumstick 小件、小 oval 碎物；罐/果等形状规则已在前命中）
@@ -1169,7 +1176,8 @@ class TidyroomAgent(VLMAgent):
         # 大件先验（R24-33 教训：57cm 灰方块确认成 trash——历史可搬大件
         # ≥40cm 只有抱枕）：**限定可搬尺寸区间**（<_MAX_ITEM_DIM），否则
         # R25 污染——冰箱/沙发/墙板等超大件也全部落进 pillow
-        if self._BIG_DIM <= max(self._dims(obj)) < self._MAX_ITEM_DIM:
+        if self._BIG_DIM <= max(self._dims(obj)) < self._MAX_ITEM_DIM \
+                and min(self._dims(obj)) < self._FURNITURE_MIN_DIM:
             return "pillow"
         return None
 
@@ -1353,6 +1361,8 @@ class TidyroomAgent(VLMAgent):
             dx, dy, dz = self._dims(obj)
             if max(dx, dy, dz) > self._MAX_ITEM_DIM or min(dx, dy, dz) < self._MIN_DIM:
                 continue
+            if min(dx, dy, dz) >= self._FURNITURE_MIN_DIM:
+                continue  # 块状家具厚度（椅 61×61×80）不入队
             confirm = oid in self._ambiguous
             if not confirm and cat is None:
                 continue  # 非歧义但无类别（不该出现，保险）

@@ -417,7 +417,7 @@ def test_max_dim_cap_100_admits_big_pillows():
     p81["color"] = "white"
     p91 = obj("32", shape="pillow", dz=86, dx=91, dy=44)
     p91["color"] = "gray"
-    big_unknown = obj("36", shape="square", dz=95, dx=95, dy=90)
+    big_unknown = obj("36", shape="square", dz=95, dx=95, dy=40)
     a = v4_agent([p81, p91, big_unknown])
     a._apply_rule_categories()
     assert a._categories["32"] == "pillow"
@@ -431,3 +431,17 @@ def test_max_dim_cap_100_admits_big_pillows():
     q._rebuild_queue()
     oids = [t["oid"] for t in q._queue]
     assert "32" in oids and "36" in oids           # 81/95cm 均入队
+
+
+def test_furniture_thickness_collision_guard():
+    # 用户提议：用椅子三维签名做碰撞——61×61×80 块状物即使 shape=Unknown
+    # 也不进 pillow 判定/队列（历史物品 min≤44，椅 min=61）
+    unk_chair = obj("21", shape="Unknown", dz=80, dx=61, dy=61)
+    unk_chair["color"] = "gray"
+    thick_pillow_shape = obj("22", shape="pillow", dz=80, dx=65, dy=65)  # 块状"枕"
+    real_thick_pillow = obj("32", shape="pillow", dz=86, dx=91, dy=44)   # 44<50 ✓
+    a = v4_agent([unk_chair, thick_pillow_shape, real_thick_pillow])
+    a._apply_rule_categories()
+    assert "21" not in a._categories       # Unknown 椅：大件先验被厚度守卫拦下
+    assert "22" not in a._categories       # 块状 pillow 形：同拦
+    assert a._categories["32"] == "pillow"  # 91×44×86 真厚枕通过
