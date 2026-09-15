@@ -409,3 +409,25 @@ def test_big_prior_bounded_and_chair_excluded():
     assert "22" not in a._categories       # chair 拉黑
     assert "7" not in a._categories        # >80cm 超出可搬区间不判
     assert a._categories["33"] == "pillow"  # 65cm 在 40~80 区间内
+
+
+def test_max_dim_cap_100_admits_big_pillows():
+    # R26-32 白枕 81cm / R22-32 灰枕 91cm 曾被 80 上限整件误挡
+    p81 = obj("32", shape="rectangle", dz=37, dx=81, dy=55)
+    p81["color"] = "white"
+    p91 = obj("32", shape="pillow", dz=86, dx=91, dy=44)
+    p91["color"] = "gray"
+    big_unknown = obj("36", shape="square", dz=95, dx=95, dy=90)
+    a = v4_agent([p81, p91, big_unknown])
+    a._apply_rule_categories()
+    assert a._categories["32"] == "pillow"
+    assert a._categories["36"] == "pillow"          # 95cm 大件先验（<100）
+    q = a
+    q._containers = {"sofa": obj("14", shape="rectangle", dz=99, dx=112, dy=410)}
+    q._container_slots = {}
+    q._pair_cats = set()
+    q._pair_shoes = lambda: None
+    q._ambiguous = set()
+    q._rebuild_queue()
+    oids = [t["oid"] for t in q._queue]
+    assert "32" in oids and "36" in oids           # 81/95cm 均入队

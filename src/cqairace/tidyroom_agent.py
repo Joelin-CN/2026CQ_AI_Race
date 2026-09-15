@@ -134,7 +134,10 @@ class TidyroomAgent(VLMAgent):
     _OP_TIMEOUT = 40.0       # 单次 tongsim 调用超时
     _VLM_TIMEOUT = 75.0      # 单次 VLM 调用超时（官方客户端回退路径，实测 68s）
     _VLM_BUDGET = 160.0      # VLM 收割总上限（回退路径用）
-    _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
+    _MAX_ITEM_DIM = 100.0    # 候选物品最大边（cm）：80→100——R26-32 白枕
+                              # 81cm、R22-32 灰枕 91cm 曾被 80 上限整件误挡
+                              # （not pickup 秒拒零成本，宁可放宽；80~100 区间
+                              # 家具仅餐椅，已被 shape 拉黑）
     _MIN_DIM = 1.0           # 排除点状 AABB（墙角标记 min=0 精确退化；
                               # 2→1：R17-33 薄片物品 10×10×1 曾被误杀）
     _PILLOW_MIN_DIM = 30.0   # pillow 尺寸下限（R14/18/19/20/22 复盘：真枕
@@ -1437,6 +1440,15 @@ class TidyroomAgent(VLMAgent):
                 self.tongsim.acquire_first_person_perception, self.character_id,
                 1280, 720, default={},
             )
+            # 拿起帧感知顺带合并 world（走到物品边的视野可暴露遮挡件，
+            # 与确认帧同款 vol-max 合并；主循环每件后会重分类入队）
+            for obj in held.get("objects", []) or []:
+                oid2 = str(obj.get("object_id", ""))
+                if not oid2:
+                    continue
+                prev = self._world.get(oid2)
+                if prev is None or self._vol(obj) > self._vol(prev):
+                    self._world[oid2] = obj
             if held.get("image"):
                 self._save_frame(f"took_{oid}", held["image"],
                                  held.get("objects", []) or [])
