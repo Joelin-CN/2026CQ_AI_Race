@@ -137,6 +137,9 @@ class TidyroomAgent(VLMAgent):
     _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
     _MIN_DIM = 2.0           # 排除点状 AABB（墙角标记）
     _MAX_BASE_Z = 150.0      # 排除壁挂/吊灯（place_location Z 上限）
+    # 场景道具 shape（test R12 复盘：40 号=玄关盆栽 shape=plant 21×21×36，
+    # 不可交互且非五类物品——按 shape 拉黑，id 跨轮不稳不可用）
+    _SCENE_PROP_SHAPES = {"plant"}
     _PAIR_DIST = 50.0        # 鞋成对判定的最大间距（cm，实测一双两脚相距 9~11cm）
     _PAIR_DIM_TOL = 12.0     # 鞋成对判定的尺寸容差（cm）
 
@@ -614,7 +617,7 @@ class TidyroomAgent(VLMAgent):
         for oid, obj in self._world.items():
             if oid in self._done_oids or oid in cont_oids:
                 continue
-            if self._is_point(obj) or self._too_high(obj):
+            if self._is_point(obj) or self._too_high(obj) or self._is_scene_prop(obj):
                 continue
             d = self._dims(obj)
             if min(d) >= self._MIN_DIM and max(d) <= self._MAX_ITEM_DIM:
@@ -737,7 +740,7 @@ class TidyroomAgent(VLMAgent):
         wanted: dict[str, dict] = {}
         for o in objects:
             oid = str(o.get("object_id", ""))
-            if not oid or self._is_point(o) or self._too_high(o):
+            if not oid or self._is_point(o) or self._too_high(o) or self._is_scene_prop(o):
                 continue
             dx, dy, dz = self._dims(o)
             if not (self._MIN_DIM <= min(dx, dy, dz)
@@ -778,7 +781,7 @@ class TidyroomAgent(VLMAgent):
         compact = []
         for o in frame["objects"]:
             oid = str(o.get("object_id", ""))
-            if not oid or self._is_point(o) or self._too_high(o):
+            if not oid or self._is_point(o) or self._too_high(o) or self._is_scene_prop(o):
                 continue
             dx, dy, dz = self._dims(o)
             loc = o.get("place_location") or {}
@@ -986,7 +989,8 @@ class TidyroomAgent(VLMAgent):
         """
         cont_oids = {str(c.get("object_id")) for c in self._containers.values()}
         for oid, obj in self._world.items():
-            if oid in self._done_oids or self._is_point(obj) or self._too_high(obj):
+            if oid in self._done_oids or self._is_point(obj) or self._too_high(obj) \
+                    or self._is_scene_prop(obj):
                 continue
             if oid in cont_oids:
                 continue  # 已解析容器本体（垃圾桶等尺寸可过物品筛选）不参与定类
@@ -1048,7 +1052,7 @@ class TidyroomAgent(VLMAgent):
         for oid, obj in self._world.items():
             if oid in self._done_oids or self._categories.get(oid) == "shoe":
                 continue
-            if self._is_point(obj) or self._too_high(obj):
+            if self._is_point(obj) or self._too_high(obj) or self._is_scene_prop(obj):
                 continue
             dx, dy, dz = self._dims(obj)
             if not (self._MIN_DIM <= min(dx, dy, dz) and max(dx, dy, dz) <= self._MAX_ITEM_DIM):
@@ -1082,7 +1086,7 @@ class TidyroomAgent(VLMAgent):
         for oid, obj in self._world.items():
             if oid in self._done_oids or oid in self._categories:
                 continue
-            if self._is_point(obj) or self._too_high(obj):
+            if self._is_point(obj) or self._too_high(obj) or self._is_scene_prop(obj):
                 continue
             cat = self._rule_category(oid)
             if cat:
@@ -1182,7 +1186,7 @@ class TidyroomAgent(VLMAgent):
         px, py, tol = prior
         best, best_d = None, float("inf")
         for obj in self._world.values():
-            if self._is_point(obj) or self._too_high(obj):
+            if self._is_point(obj) or self._too_high(obj) or self._is_scene_prop(obj):
                 continue
             dx, dy, dz = self._dims(obj)
             if ctype == "table":
@@ -1605,6 +1609,11 @@ class TidyroomAgent(VLMAgent):
             return float(loc.get("Z", 0) or 0) > cls._MAX_BASE_Z
         except (TypeError, ValueError):
             return True
+
+    @classmethod
+    def _is_scene_prop(cls, obj: dict) -> bool:
+        """场景道具（盆栽等）：shape 直接标注类型，不可交互、非五类物品。"""
+        return str(obj.get("shape", "")).lower() in cls._SCENE_PROP_SHAPES
 
     @staticmethod
     def _bb_xy(obj: dict) -> tuple[float, float, float, float]:

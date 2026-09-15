@@ -374,6 +374,7 @@ v4 架构（讨论定案，绑定三路线见 v2-notes §7-20）：
 | 2026-09-15 | tidyroom | **识别管线 v4**：裁剪自标+思考关直连+像素面积加权投票+三段式 gate+到场确认（stamp_perceive/vlm_direct 新模块，v2-notes §7-19~22） | src/cqairace/{stamp_perceive,vlm_direct,tidyroom_agent}.py + tests/（32 绿）+ temp/p4_tidyroom/v4_{probe,replay}* | 离线：识别 0.5~1.0s/调用（旧 42~68s），错误退化为歧义不再放错；**实机 A/B 待起栈** |
 | 2026-09-16 | tidyroom | v4 实机四轮（train，连环修 3 bug：回退走官方客户端/裸值 X/弯引号，v2-notes §7-23） | temp/p4_tidyroom/test_sessions/*train_v4* + p4_tidyroom_train_v4*.log | **80.1/81.42/81.03/81.27 全 5/5，81.42=train 新高**；基线 VLM 末轮实机贡献达成，到场确认每轮跑通；34 单测绿 |
 | 2026-09-16 | tidyroom | 放置链 v5：force_locate 远距直放（学队友 98 分砍容器走位）+场景就绪等待+二轮扫描跳过（§7-26） | temp/p4_tidyroom/test_sessions/*train_v5* + p4_tidyroom_train_v5*.log | v5a 0 分=UE 慢加载（已修）；v5b/v5c **81.3/81.42 持平，总时长 127s→80s**；结论：时间分窗口在 <40s 级，80~127s 区间修剪不敏感，待官网分校准定投入 |
+| 2026-09-16 | tidyroom | **test R12/R13（v4+v5 首上 test）**：R12 placed 4（40=盆栽→shape=plant 按 shape 拉黑，§7-27）；R13 **placed 6 零放弃 ~95s** | test_sessions/*test_r1[23]* + test_round_1[23].bin | R13 追平 R9 最佳且更快，两歧义件到场确认翻正；bin 待复盘核验后定替换 |
 | 2026-09-15 | jigsaw | 队友技能模块整合（jigsaw_skill+薄壳 agent）train/test 各一轮 | temp/baseline_records/jigsaw_agent_*.log | **train 88.17**（基线 27.2）；test 通过 |
 
 **事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator

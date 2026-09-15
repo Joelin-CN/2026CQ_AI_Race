@@ -137,6 +137,7 @@ def v4_agent(world, votes=None, cats=None, rule=()):
     a._done_oids = set()
     a._locked = False
     a._containers = {}
+    a._container_votes = {}
     a._trace = lambda *k, **kw: None
     return a
 
@@ -280,3 +281,13 @@ def test_rule_box_small_nonblack_is_trash_but_black_bin_not():
     a._world["18"]["color"] = "black"
     assert a._rule_category("40") == "trash"
     assert a._rule_category("18") is None   # 黑 box=垃圾桶本体，不自搬自
+
+
+def test_scene_prop_plant_excluded():
+    # test R12 复盘：40 号=玄关盆栽 shape=plant 21×21×36，不可交互非五类
+    plant = obj("40", shape="plant", dz=36, dx=21, dy=21)
+    a = v4_agent([plant, obj("31")])
+    assert a._is_scene_prop(plant) and not a._is_scene_prop(a._world["31"])
+    a._apply_rule_categories()
+    a._finalize_recognition()
+    assert "40" not in a._categories and "40" not in a._ambiguous
