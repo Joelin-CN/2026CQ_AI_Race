@@ -159,6 +159,7 @@ class TidyroomAgent(VLMAgent):
         self._blacklist: set[str] = set()
         self._placed = 0
         self._gave_up = 0
+        self._placements: list[dict] = []              # 放置明细(复盘用)
         self._session_dir: Path | None = None  # 本轮档案目录(首次落盘时创建)
 
     # ------------------------------------------------------------------ #
@@ -423,6 +424,7 @@ class TidyroomAgent(VLMAgent):
                         "gave_up": self._gave_up,
                         "blacklist": sorted(self._blacklist),
                         "categories": self._categories,
+                        "placements": self._placements,
                     }, ensure_ascii=False, indent=1), encoding="utf-8")
         except Exception:  # noqa: BLE001
             pass
@@ -797,6 +799,16 @@ class TidyroomAgent(VLMAgent):
                 resolved[ctype] = rule
             elif ctype not in resolved and rule is not None:
                 resolved[ctype] = rule
+            elif ctype == "shoe_cabinet" and rule is not None:
+                # VLM 投票选出的鞋柜若非窄深贴墙柜，以规则结果为准
+                # （R5 教训：厨房柜可被误投成鞋柜）
+                voted = resolved.get(ctype)
+                if voted is not None:
+                    dx, dy, dz = self._dims(voted)
+                    if not (50 <= dz <= 110 and 20 <= min(dx, dy) <= 45):
+                        logger.info("shoe_cabinet VLM 结果非窄深柜({:.0f}x{:.0f}x{:.0f})，规则校正",
+                                    dx, dy, dz)
+                        resolved[ctype] = rule
         # 防倒退：已有容器不被规则清空
         for k, v in resolved.items():
             self._containers[k] = v
@@ -818,7 +830,11 @@ class TidyroomAgent(VLMAgent):
             elif ctype == "sofa":
                 hit = shape == "rectangle" and max(dx, dy) > 250 and dz < 120
             elif ctype == "shoe_cabinet":
-                hit = color == "brown" and shape == "rectangle" and dz > 55
+                # 鞋柜=贴墙窄高柜（实测 40 号 109x23x60）：水平窄边 20~45cm、
+                # 高 50~110cm。厨柜/灶台深 60cm+ 会被此判据排除
+                # （2026-09-15 R5 教训：厨房柜被误认鞋柜，2 件鞋放灶台 0 计分）
+                hit = color == "brown" and shape == "rectangle" \
+                    and 50 <= dz <= 110 and 20 <= min(dx, dy) <= 45
             if hit and self._vol(obj) > best_vol:
                 best, best_vol = obj, self._vol(obj)
         if ctype == "shoe_cabinet":
@@ -828,6 +844,11 @@ class TidyroomAgent(VLMAgent):
         return best
 
     def _nearest_shoe_container(self, fallback: dict | None) -> dict | None:
+        """鞋柜兜底判据：鞋群 xy 质心最近的**窄深贴墙柜**（距离 <300cm）。
+
+        窄深判据（水平窄边 20~45cm、高 50~110cm）与 _rule_container 同源，
+        防止厨房橱柜等深柜在鞋撒进厨房区时被误选（R5 教训）。
+        """
         shoes = [o for o in self._world.values()
                  if str(o.get("shape", "")).lower() in ("boot", "shoe")]
         if not shoes:
@@ -839,8 +860,10 @@ class TidyroomAgent(VLMAgent):
             color = str(obj.get("color", "")).lower()
             shape = str(obj.get("shape", "")).lower()
             dx, dy, dz = self._dims(obj)
-            if color != "brown" or shape != "rectangle" or min(dx, dy, dz) < self._MIN_DIM:
+            if color != "brown" or shape != "rectangle" or min(dx, dy) < self._MIN_DIM:
                 continue
+            if not (50 <= dz <= 110 and 20 <= min(dx, dy) <= 45):
+                continue  # 非窄深贴墙柜
             loc = obj.get("place_location") or {}
             d = ((float(loc.get("X", 0)) - gx) ** 2 + (float(loc.get("Y", 0)) - gy) ** 2) ** 0.5
             if d < min(best_d, 300.0):
@@ -902,6 +925,11 @@ class TidyroomAgent(VLMAgent):
             self._placed += 1
             self._container_slots[task["cont_key"]] = \
                 self._container_slots.get(task["cont_key"], 0) + 1
+            self._placements.append({
+                "oid": oid, "cat": task["cat"], "cont": task["cont_key"],
+                "cont_obj": str(self._containers.get(task["cont_key"], {})
+                                .get("object_id", "?")),
+                "put": task["put"], "sec": round(time.time() - t1, 1)})
             logger.info("件完成 {} → {} ({:.1f}s), 累计 {}",
                         oid, task["cont_key"], time.time() - t1, self._placed)
             self._trace("placed", oid=oid, cat=task["cat"], cont=task["cont_key"],
