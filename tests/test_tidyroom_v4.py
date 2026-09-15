@@ -372,3 +372,25 @@ def test_ring_and_slice_are_food():
     a._apply_rule_categories()
     assert a._categories["33"] == "food"
     assert a._categories["34"] == "food"
+
+
+def test_big_item_prior_pillow():
+    # R24-33 用户定策：57cm 灰方块是抱枕——历史可搬大件 max≥40 只有
+    # pillow；ring 31cm/靴 25cm 不受影响
+    square = obj("33", shape="square", dz=48, dx=57, dy=58)
+    square["color"] = "gray"
+    donut = obj("34", shape="ring", dz=11, dx=31, dy=32)
+    donut["color"] = "brown"
+    a = v4_agent([square, donut])
+    a._apply_rule_categories()
+    assert a._categories["33"] == "pillow"
+    assert a._categories["34"] == "food"          # 31cm ring 不触发大件先验
+
+
+def test_mid_size_no_rule_still_none():
+    # 20~40cm 无形状规则件不落任何兜底（走确认）
+    mid = obj("35", shape="oval", dz=22, dx=24, dy=20)
+    mid["color"] = "gray"
+    a = v4_agent([mid])
+    a._apply_rule_categories()
+    assert "35" not in a._categories

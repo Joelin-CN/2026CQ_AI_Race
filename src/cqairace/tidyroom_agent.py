@@ -143,6 +143,10 @@ class TidyroomAgent(VLMAgent):
     _TINY_DIM = 20.0         # 极小件阈值：无形状规则命中时按 trash 兜底
                               # （用户定策：极小件进垃圾桶；cylinder 罐/round
                               # 果等形状规则在前不受影响）
+    _BIG_DIM = 40.0          # 大件先验（R24-33 用户定策：57cm 灰方块被确认
+                              # trash 是错的——历史可搬大件 max≥40 只有 pillow，
+                              # ring 31/靴 25/罐 34 全在下方）：无形状规则命中
+                              # 且 max≥40 → pillow
     _MAX_BASE_Z = 30.0       # 候选基座高度上限（place_location Z）：出题生成器
                               # 保证可搬物品"撒地面"（历轮实测 z0=0~5cm），收紧自
                               # 150cm 一刀排除高处背景构件（用户复盘点名 9/26/27/
@@ -1158,6 +1162,10 @@ class TidyroomAgent(VLMAgent):
         # rock/drumstick 小件、小 oval 碎物；罐/果等形状规则已在前命中）
         if max(self._dims(obj)) < self._TINY_DIM:
             return "trash"
+        # 大件先验（R24-33 教训：57cm 灰方块确认成 trash——历史可搬大件
+        # ≥40cm 只有抱枕）：无形状规则命中的大件按 pillow
+        if max(self._dims(obj)) >= self._BIG_DIM:
+            return "pillow"
         return None
 
     # ------------------------------------------------------------------ #
@@ -1419,6 +1427,18 @@ class TidyroomAgent(VLMAgent):
             self._trace("take_failed", oid=oid, cat=task["cat"], res=self._err(take))
             return
 
+        # 行车记录仪：拿起后立刻拍一张近距帧（R24 复盘教训——confirm 帧
+        # 是放置后拍的，物体已传送进容器看不见；此帧供人工核对搬走的是
+        # 什么）。仅存档用，1280 即可，~1.3s/件。
+        if _SAVE_FRAMES:
+            held = self._call_with_timeout(
+                self.tongsim.acquire_first_person_perception, self.character_id,
+                1280, 720, default={},
+            )
+            if held.get("image"):
+                self._save_frame(f"took_{oid}", held["image"],
+                                 held.get("objects", []) or [])
+
         ok = self._put_with_retry(task)
         self._done_oids.add(oid)
         if ok:
@@ -1491,14 +1511,20 @@ class TidyroomAgent(VLMAgent):
             cat = _sp.parse_classification(self._direct_invoke(parts)).get(oid)
             sec = round(time.time() - t0, 1)
             if cat and cat != "other":
-                # 尺寸守卫（R22-57 教训：11cm 鸡腿被 VLM 确认成 pillow）：
-                # pillow 须 ≥30cm，违者按极小件改判 trash
+                # 尺寸守卫（R22-57 教训：11cm 鸡腿被 VLM 确认成 pillow；
+                # R24-33 教训：57cm 灰方块被确认成 trash）：
+                # pillow 须 ≥30cm、大件(≥40cm)不可能是 trash——违者改判
                 obj = self._world.get(oid) or {}
                 if cat == "pillow" and max(self._dims(obj)) < self._PILLOW_MIN_DIM:
                     logger.info("确认 {} → {} 但 max dim {:.0f}cm < {:.0f}，"
                                 "改判 trash（进桶）", oid, cat,
                                 max(self._dims(obj)), self._PILLOW_MIN_DIM)
                     cat = "trash"
+                elif cat == "trash" and max(self._dims(obj)) >= self._BIG_DIM:
+                    logger.info("确认 {} → {} 但 max dim {:.0f}cm ≥ {:.0f}，"
+                                "改判 pillow（大件先验）", oid, cat,
+                                max(self._dims(obj)), self._BIG_DIM)
+                    cat = "pillow"
                 self._item_votes.setdefault(oid, Counter())[cat] += self._CONFIRM_W
                 self._item_votes_n.setdefault(oid, Counter())[cat] += 1
                 top = self._weighted_top(oid)
