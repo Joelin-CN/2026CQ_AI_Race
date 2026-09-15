@@ -67,6 +67,19 @@ def test_box_on_left_panel_maps_region(synth_templates):
     assert white > 50, f"左面板未见白色标注框 (white={white})"
 
 
+def test_only_labeled_items_drawn(synth_templates):
+    """只画 labels 登记的物品：未登记编号解析到也不画（drawn 不含）。"""
+    raw = _synth_composite([
+        ("33", 50, 100, (60, 160, 60)),
+        ("7", 300, 300, (200, 120, 40)),
+        ("12", 500, 500, (40, 80, 200)),
+    ])
+    ann = dc.annotate(raw, {"33": "cup"}, {"33": "rule"})
+    assert ann is not None
+    assert set(ann[1]["labels_found"]) == {"33", "7", "12"}   # 全部解析到
+    assert ann[1]["drawn"] == ["33"]                            # 只画登记的
+
+
 def test_garbage_bytes_returns_none(synth_templates):
     assert dc.annotate(b"not-an-image", None, None) is None
     assert dc.annotate(b"", None, None) is None

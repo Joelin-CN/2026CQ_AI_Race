@@ -494,7 +494,8 @@ class TidyroomAgent(VLMAgent):
     # ------------------------------------------------------------------ #
 
     def _dashcam_maps(self) -> tuple[dict[str, str], dict[str, str]]:
-        """行车记录仪标注用：oid → (标签文字, 颜色键)。"""
+        """行车记录仪标注用：oid → (标签文字, 颜色键)。只登记可搬物品
+        （_categories 即识别出的物品集），容器/家具不画——复盘只关心物品。"""
         labels: dict[str, str] = {}
         colors: dict[str, str] = {}
         placed_oids = {pl["oid"] for pl in self._placements}
@@ -512,11 +513,6 @@ class TidyroomAgent(VLMAgent):
                 colors[oid] = "rule"
             else:
                 colors[oid] = "vlm"
-        for key, cont in self._containers.items():
-            coid = str(cont.get("object_id", ""))
-            if coid and coid != "?":
-                labels.setdefault(coid, f"cont:{key}")
-                colors[coid] = "container"
         return labels, colors
 
     def _save_frame(self, tag: str, b64: str,

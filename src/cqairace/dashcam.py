@@ -176,7 +176,9 @@ def _label_region(panel: np.ndarray, grp: list[dict]) -> tuple[int, int, int, in
 def annotate(img_bytes: bytes,
              labels: dict[str, str] | None = None,
              colors: dict[str, str] | None = None) -> tuple[bytes, dict] | None:
-    """标注一帧复合图。返回 (标注后 jpg bytes, 识别元数据)；失败返回 None。"""
+    """标注一帧复合图。只画 labels 里登记的物体（agent 的可搬物品清单），
+    编号未命中清单的不画——避免满图框住椅子/墙面/地板等噪声。
+    返回 (标注后 jpg bytes, 识别元数据)；失败返回 None。"""
     if not img_bytes:
         return None
     buf = np.frombuffer(img_bytes, np.uint8)
@@ -193,32 +195,43 @@ def annotate(img_bytes: bytes,
     panel = img[:, pw:]
     labels = labels or {}
     colors = colors or {}
-    found = []
+    scale = max(1.0, pw / 640.0)
+    # oid → 最大区域（同一编号的多次戳章合并，取最完整的一块）
+    best: dict[str, tuple[int, int, int, int]] = {}
+    found_all: list[str] = []
     for grp in _group_labels(_extract_glyphs(panel)):
         num = "".join(g["digit"] for g in grp)
-        if not num.isdigit():
+        if not num.isdigit() or len(num) > 3:
             continue
-        if len(num) > 3:           # 误组成长串直接丢弃
+        found_all.append(num)
+        if num not in labels:
             continue
         bx, by, bw, bh = _label_region(panel, grp)
-        found.append({"oid": num, "num": int(num), "bbox": [bx, by, bw, bh]})
-    meta = {"labels_found": [f["oid"] for f in found]}
-    for f in found:
-        oid = f["oid"]
-        text = f"{oid}:{labels.get(oid, '?')}"
+        if bw * bh < 64 or bw > pw * 0.6:
+            continue
+        prev = best.get(num)
+        if prev is None or bw * bh > prev[2] * prev[3]:
+            best[num] = (bx, by, bw, bh)
+    for oid, (bx, by, bw, bh) in best.items():
+        text = f"{oid}:{labels[oid]}"
         color = COLORS.get(colors.get(oid, "unknown"), COLORS["unknown"])
-        bx, by, bw, bh = f["bbox"]
+        thick = max(2, round(2 * scale))
         lx, ly = max(0, bx - pw), by                      # 映射到左面板
-        cv2.rectangle(img, (lx, ly), (lx + bw, ly + bh), color, 2)
-        cv2.rectangle(img, (pw + bx, by), (pw + bx + bw, by + bh), color, 1)
-        ty = max(14, ly - 4)
-        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(img, (lx, ty - 14), (lx + tw + 4, ty + 2),
-                      (0, 0, 0), -1)
+        cv2.rectangle(img, (lx, ly), (min(w - 1, lx + bw), min(h - 1, ly + bh)),
+                      color, thick)
+        cv2.rectangle(img, (pw + bx, by), (min(w - 1, pw + bx + bw),
+                                           min(h - 1, by + bh)), color, 1)
+        fs = 0.55 * scale
+        ty = max(round(16 * scale), ly - thick)
+        (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs,
+                                    max(1, round(scale)))
+        cv2.rectangle(img, (lx, ty - round(16 * scale)),
+                      (lx + tw + 4, ty + 2), (0, 0, 0), -1)
         cv2.putText(img, text, (lx + 2, ty), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, color, 1, cv2.LINE_AA)
+                    fs, color, max(1, round(scale)), cv2.LINE_AA)
     ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
-    return (enc.tobytes(), meta) if ok else None
+    return (enc.tobytes(), {"labels_found": found_all,
+                            "drawn": sorted(best)}) if ok else None
 
 
 def save_frame(directory: Path, tag: str, img_bytes: bytes,
