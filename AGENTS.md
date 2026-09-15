@@ -22,7 +22,7 @@
 | `official_source/gitee/baseline-agent/` | 官方库（gitignore，另行克隆；接口语义以其源码与 docs/ 为准） |
 | `E:\2026\cqAIRace\Windows` | 官方完整比赛系统（gitignore 外部路径）：客户端/赛题系统/PDF 文档，2026.09.12 版，详见架构文档第 8 节 |
 | `temp/` | 本地临时区（gitignore）：赛题系统安装包、下载中间物 |
-| `temp/p4_tidyroom/test_sessions/` | tidyroom 逐轮感知档案（gitignore）：每轮一目录 `{YYYYMMDD_HHMMSS[_标签]}/`，内含 `frame_*.jpg`（行车记录仪）+ `session_summary.json`（placed/黑名单/分类）；同目录平级存放该轮 `test_round_*.bin` 备份 |
+| `temp/p4_tidyroom/test_sessions/` | tidyroom 逐轮感知档案（gitignore）：每轮一目录 `{YYYYMMDD_HHMMSS[_标签]}/`，内含 `frame_*.jpg`（行车记录仪）+ `session_summary.json`（placed/黑名单/分类 + v4 起加权票 votes/歧义 ambiguous/到场确认 confirms）；同目录平级存放该轮 `test_round_*.bin` 备份 |
 | `logs/`（运行时生成） | 运行日志与 prompt/感知图落盘（gitignore） |
 
 ## 工具链

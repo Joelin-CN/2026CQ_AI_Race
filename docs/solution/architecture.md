@@ -124,7 +124,7 @@
 | counting 分类计数 | 确定性聚合：转身 360° 扫描 + `objects` 按 object_id/世界坐标去重 + 颜色/形状统计 | objects 元数据 | 规划 |
 | raven 瑞文测试 | **已破局（2026-09-14）**：官方 ResNet 首选 + 直接提交，v2 题库 train 实测 13/13 对（97~99.7 分）。实现见 `src/cqairace/raven_proto.py`；旧系统 0 分系 v1 判卷/题库缺陷 | 一题一提交/一题一连接的 v2 语义 | ✅ 验证通过 |
 | npc 对话 | 强 LLM 多轮对话收集线索，`submit_answer` 提交 | `speak_to_npc` 返回 `npc_reply`+`hints` 注入下一轮 prompt（官方已有） | 规划 |
-| tidyroom 整理房间 | **已落地初版（2026-09-14，train 32 分 = 基线翻倍）**：三阶段——360° 扫描建图 → VLM 一次性并行分类（物品→容器映射，规则兜底）→ 零 VLM 元数据执行（`world_aabb` 中心+顶高放置、not pickup 秒拒拉黑、30s 看门狗 finish）。实现 `src/cqairace/tidyroom_agent.py`；待多轮 train 调优 + test | `objects` 元数据 + 官方"按包围盒放置"提示 | ✅ 首版验证（32/100） |
+| tidyroom 整理房间 | **识别管线 v4 已实机验证（2026-09-16 train 四轮：80.1/81.42/81.03/81.27 全 5/5，81.42 新高，§7-23）**：三段式 gate——扫描(2560×720) → 基线识别（戳定位→VLM 转写→洪泛区域→裁剪自标编号→轻量 prompt 分类；直连客户端思考关 0.5~1.0s/调用；像素面积加权投票，gate 截止 45s，VLM 全挂按规则开搬=v3 下限）→ 分类锁定 → 纯执行 + 歧义件到场确认（单帧低权票/票分裂/规则冲突/无票 → 走到跟前特写一票权重 5；错误退化为"确认"而非"放错"）。治三病：绑号错、近视、放错不可逆。TIDYROOM_V4=0 一键回退 v3。前史：v3 train 80.88 / test R9 placed 6/6 | `objects` 元数据 + 静态容器先验（§7-18）+ stamp_perceive/vlm_direct 模块 | ✅ train 4/4 轮 5/5；test A/B 待跑 |
 | jigsaw 拼图 | **已落地（2026-09-15，train 88.17 = 基线 27.2 的 3.2 倍）**：队友技能模块（三层降级：几何推演/VLM+CV 匹配/执行校验，fallback 顺序放最快）+ 薄壳 `jigsaw_agent.py`；test 一次通过 | 官方提示：拼图块 X=837、观察点 (750,191)；force_locate 两步式放置 | ✅ 验证通过 |
 | （决赛）长程串联 | 任务分解 planner + 全局记忆 + 阶段状态机 | 复用上述五技能 | 预留 |
 

@@ -319,6 +319,44 @@ YOLO 标注首跑）：world=53 placed=4（33 杯→桌、34 食→桌、32 鞋�
 无增益（v2-notes §7-17）；②行车记录仪标注链路端到端跑通（帧+逐帧
 meta json 落盘，离线复盘标注可用）。
 
+### 2026-09-15 下午：tidyroom 识别管线 v4 定案（三段式 gate + 裁剪自标 + 加权投票 + 到场确认）
+
+宏观复盘结论：容器几何跨轮稳定（§7-18 先验锚定已入代码）、位置由
+`objects` 元数据免费给，瓶颈收敛为"可搬物品类型识别"；近视眼病理 =
+整图不裁剪 + VLM 自读 8-10px 编号绑错 oid + 真·视觉错（颈枕案），
+前两条可根治。视觉模型核验新增证据：**分割面板色块是随机实例色**
+（地板粉色/黑垃圾桶青绿块），颜色绑定路线判死（v2-notes §7-19）。
+
+v4 架构（讨论定案，绑定三路线见 v2-notes §7-20）：
+1. **基线层**：扫描帧（2560×720）→ 阈值+连通域定位数字戳（免模板）
+   → VLM 转写放大戳（R11 离线 5/5 验证）→ 洪泛色块得像素面积+区域
+   → 左面板裁剪放大、代码自画大编号 → 轻量 prompt 五桶分类（元数据
+   只带可搬候选；容器半段砍掉，先验+规则已解决）。
+2. **加权投票**：`w=clip(sqrt(area/A_ref),0.3,3)`；规则推翻门槛从
+   "≥2 裸票"改"加权≥2.0 且 top1≥1.5×次优"。
+3. **gate 与锁定**：识别阶段收割至全部帧完成或截止线（初值 100s，
+   待离线实验定稿）；歧义判定（top1<1.5×次优/与规则冲突/无票/other）
+   → 分类锁定 → 纯执行（明确件到场直拿零等待；歧义件到场特写确认，
+   一票权重 5；other 件再问仍 other 则按规则或放弃）。
+
+时序预算：gate≤100s + 6 件×20s + 1-2 歧义件到场 ≈ 250s < 370s。
+前置离线实验（temp/p4_tidyroom/，R9-R11 存档帧回放）：轻量 prompt
+时延（vs 68s 大 prompt 基线，到场确认启用范围的分水岭）、多图一消息
+支持、全链准确率（首份"绑号错/视觉错"分开统计报告）。VLM 二供
+（zhipu GLM）本轮明确不做。规则补 shape=pillow/box 分支（§7-18 待办）。
+
+**实施完成（2026-09-15 深夜，同日闭环）**：离线实验三项全部落地
+（§7-21，时延颠覆——思考关直连 0.5~1.0s/调用 vs 旧 42~68s 且空文本；
+多图支持但弃用；准确率回放）→ 生产实现三模块（`stamp_perceive.py`
+裁剪自标感知 / `vlm_direct.py` 思考关直连客户端读 VLM_CLIENT_CFG_*
+环境变量、官方客户端回退 / `tidyroom_agent.py` v4 三段式）→ 回放
+对比暴露"远距单帧低权票定案"缺陷并修正（§7-22，错误退化为歧义→
+到场确认，不再放错）→ 32 单测全绿。gate 截止线按实验收紧到 45s。
+开关：TIDYROOM_V4=0 回退 v3 流水线（A/B 对照与回退保险）。
+**train 实机四轮已过（2026-09-16 凌晨，80.1/81.42/81.03/81.27 全
+5/5，81.42 新高；连环修 3 个实机 bug，见 §7-23）——test 实机 A/B
+（含 V4=0 对照与容器先验同场）为下一步悬置项。**
+
 ### 改动登记
 
 | 日期 | 任务 | 改动 | 证据 | 分数变化 |
@@ -333,6 +371,8 @@ meta json 落盘，离线复盘标注可用）。
 | 2026-09-14 | tidyroom | 判卷机制逆向（exe 字符串）+ v3 放置链（move_to_object+put_down_sth 强制入体） | temp/baseline_records/tidyroom/eval_res.run12_48.json | **train 48.0**；test 待跑 |
 | 2026-09-15 | tidyroom | 人工导览校准（TOUR 模式）+ 颈枕尺寸判据（细长圆柱≥35cm→pillow） | temp/baseline_records/tidyroom/eval_res.run14_80.json | **train 80.88**（反超大部队 79）；test 待跑 |
 | 2026-09-15 | tidyroom | 鞋成对启发+VLM 换帧重发+prompt v2 → test R5-R7 复测 | temp/p4_tidyroom/test_sessions/ + test5_7.log | test placed 均值 1.75→3.0；train 回归 78.54 |
+| 2026-09-15 | tidyroom | **识别管线 v4**：裁剪自标+思考关直连+像素面积加权投票+三段式 gate+到场确认（stamp_perceive/vlm_direct 新模块，v2-notes §7-19~22） | src/cqairace/{stamp_perceive,vlm_direct,tidyroom_agent}.py + tests/（32 绿）+ temp/p4_tidyroom/v4_{probe,replay}* | 离线：识别 0.5~1.0s/调用（旧 42~68s），错误退化为歧义不再放错；**实机 A/B 待起栈** |
+| 2026-09-16 | tidyroom | v4 实机四轮（train，连环修 3 bug：回退走官方客户端/裸值 X/弯引号，v2-notes §7-23） | temp/p4_tidyroom/test_sessions/*train_v4* + p4_tidyroom_train_v4*.log | **80.1/81.42/81.03/81.27 全 5/5，81.42=train 新高**；基线 VLM 末轮实机贡献达成，到场确认每轮跑通；34 单测绿 |
 | 2026-09-15 | jigsaw | 队友技能模块整合（jigsaw_skill+薄壳 agent）train/test 各一轮 | temp/baseline_records/jigsaw_agent_*.log | **train 88.17**（基线 27.2）；test 通过 |
 
 **事故记录**：2026-09-14 18:37 外接 F 盘被 Windows 误弹出（插 U 盘触发），bash/orchestrator
