@@ -1144,11 +1144,13 @@ class TidyroomAgent(VLMAgent):
             return "trash"
         if shape in ("boot", "shoe"):
             return "shoe"
-        if shape == "cylinder":
+        if shape in ("cylinder", "cylindrical"):
             # 尺寸判据（2026-09-15 导览实测）：≥35cm 的细长圆柱是颈枕/抱枕
             # （45×16cm 黑圆柱颈枕曾被误判 cup 塞进茶几），罐/杯都是短圆柱。
             # R27 教训：101cm 大绿植(cylinder)曾落入本分支标 pillow——
-            # 补可搬区间与厚度守卫
+            # 补可搬区间与厚度守卫。R31 用户定案：cylindrical（UE 异写）
+            # 同义——9×9×24 米色圆柱=杯子，基线 VLM 首判 cup 被确认层
+            # 说成 pillow、守卫拦成 trash 进桶，词汇直判绕开整条歧路
             if max(self._dims(obj)) >= 35:
                 return "pillow" if (max(self._dims(obj)) < self._MAX_ITEM_DIM
                                     and min(self._dims(obj)) < self._FURNITURE_MIN_DIM) \

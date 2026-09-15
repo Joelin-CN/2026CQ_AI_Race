@@ -499,3 +499,13 @@ def test_item_on_furniture_top_not_high_filtered():
     a._apply_rule_categories()
     assert a._categories["32"] == "shoe"      # 凉鞋上茶几 → 鞋柜
     assert "58" not in a._categories          # 挂墙盒仍排除
+
+
+def test_cylindrical_word_is_cup():
+    # R31 用户定案：beige/cylindrical 9×9×24 = 杯子（基线 VLM 首判 cup
+    # 曾被确认层 pillow + 守卫 trash 送进桶）；R25-34 同词 17×26×9 同类
+    mug = obj("32", shape="cylindrical", dz=24, dx=9, dy=9)
+    mug["color"] = "beige"
+    a = v4_agent([mug])
+    a._apply_rule_categories()
+    assert a._categories["32"] == "cup"
