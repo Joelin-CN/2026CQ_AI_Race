@@ -291,3 +291,20 @@ def test_scene_prop_plant_excluded():
     a._apply_rule_categories()
     a._finalize_recognition()
     assert "40" not in a._categories and "40" not in a._ambiguous
+
+
+def test_high_background_props_excluded_ground_items_pass():
+    # 用户复盘点名的高处背景构件（吊灯/墙板/挂墙盒）须被基座高度挡住；
+    # 贴地真物品与容器（茶几 z16）须通过
+    wall_box = obj("58", shape="box", dz=32, dx=56, dy=44)   # R12-58 挂墙灰盒
+    wall_box["place_location"]["Z"] = 128
+    item = obj("32", shape="cylinder", dz=8)                  # 贴地真物品
+    table = obj("15", shape="rectangle", dz=29, dx=72, dy=137)
+    table["place_location"]["Z"] = 16                          # 容器：茶几
+    a = v4_agent([wall_box, item, table])
+    assert a._too_high(wall_box) and not a._too_high(item)
+    assert not a._too_high(table)
+    a._apply_rule_categories()
+    a._finalize_recognition()
+    assert "58" not in a._categories and "58" not in a._ambiguous
+    assert "32" in a._categories or "32" in a._ambiguous

@@ -136,7 +136,11 @@ class TidyroomAgent(VLMAgent):
     _VLM_BUDGET = 160.0      # VLM 收割总上限（回退路径用）
     _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
     _MIN_DIM = 2.0           # 排除点状 AABB（墙角标记）
-    _MAX_BASE_Z = 150.0      # 排除壁挂/吊灯（place_location Z 上限）
+    _MAX_BASE_Z = 30.0       # 候选基座高度上限（place_location Z）：出题生成器
+                              # 保证可搬物品"撒地面"（历轮实测 z0=0~5cm），收紧自
+                              # 150cm 一刀排除高处背景构件（用户复盘点名 9/26/27/
+                              # 28/52/53/55/57/58/60 全类：吊灯/墙板/横杆/挂墙盒
+                              # z0=129~288，R12-58 教训）；容器最高茶几 z16 兼容
     # 场景道具 shape（test R12 复盘：40 号=玄关盆栽 shape=plant 21×21×36，
     # 不可交互且非五类物品——按 shape 拉黑，id 跨轮不稳不可用）
     _SCENE_PROP_SHAPES = {"plant"}
