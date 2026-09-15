@@ -308,3 +308,17 @@ def test_high_background_props_excluded_ground_items_pass():
     a._finalize_recognition()
     assert "58" not in a._categories and "58" not in a._ambiguous
     assert "32" in a._categories or "32" in a._ambiguous
+
+
+def test_flat_item_not_point_filtered():
+    # R17-33 教训：薄片物品 10×10×1（垫子/杯垫类）不该被点状过滤
+    # （墙角标记是 min=0 精确退化，阈值降到 1 后仍被排除）
+    flat = obj("33", shape="cylinder", dz=1, dx=10, dy=10)
+    point = {"object_id": "9", "color": "Unknown", "shape": "Unknown",
+             "place_location": {"X": 1, "Y": 1, "Z": -10},
+             "world_aabb": {"min": {"x": 1, "y": 1, "z": -10},
+                             "max": {"x": 1, "y": 1, "z": -10}}}
+    a = v4_agent([flat, point])
+    assert not a._is_point(flat) and a._is_point(point)
+    a._apply_rule_categories()
+    assert "33" in a._categories or "33" in a._ambiguous  # 进入识别流程

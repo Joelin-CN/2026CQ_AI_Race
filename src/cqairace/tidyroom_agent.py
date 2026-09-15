@@ -90,9 +90,6 @@ _ENUM_PILLOW = os.environ.get("TIDYROOM_ENUM_PILLOW", "") not in ("", "0", "fals
 _SAVE_FRAMES = os.environ.get("TIDYROOM_SAVE_FRAMES", "") not in ("", "0", "false")
 # v4 识别管线开关（=0 回退 v3 旧整帧流水线：A/B 对比与回退开关）
 _V4 = os.environ.get("TIDYROOM_V4", "1") not in ("", "0", "false")
-# 强制二轮玄关近扫（实验开关：finalize 后候选必全部入队，正常路径
-# 二轮永不触发；=1 时无条件走玄关近扫+VLM，用于实测绑号增益）
-_FORCE_ROUND2 = os.environ.get("TIDYROOM_FORCE_ROUND2", "") not in ("", "0", "false")
 # 轮次标签：编入本轮目录名（如 test_r4 / train_a；缺省用纯时间戳）
 _RUN_TAG = os.environ.get("TIDYROOM_RUN_TAG", "")
 
@@ -138,7 +135,8 @@ class TidyroomAgent(VLMAgent):
     _VLM_TIMEOUT = 75.0      # 单次 VLM 调用超时（官方客户端回退路径，实测 68s）
     _VLM_BUDGET = 160.0      # VLM 收割总上限（回退路径用）
     _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
-    _MIN_DIM = 2.0           # 排除点状 AABB（墙角标记）
+    _MIN_DIM = 1.0           # 排除点状 AABB（墙角标记 min=0 精确退化；
+                              # 2→1：R17-33 薄片物品 10×10×1 曾被误杀）
     _MAX_BASE_Z = 30.0       # 候选基座高度上限（place_location Z）：出题生成器
                               # 保证可搬物品"撒地面"（历轮实测 z0=0~5cm），收紧自
                               # 150cm 一刀排除高处背景构件（用户复盘点名 9/26/27/
@@ -147,9 +145,10 @@ class TidyroomAgent(VLMAgent):
     # 场景道具 shape（test R12 复盘：40 号=玄关盆栽 shape=plant 21×21×36，
     # 不可交互且非五类物品——按 shape 拉黑，id 跨轮不稳不可用）
     _SCENE_PROP_SHAPES = {"plant"}
-    # 玄关近扫点（§7-24 全图）：鞋簇 (705~810,-137) 与鞋柜 (780,-144)
-    # 之间的空位，离出生点 ~90cm，四向转身可覆盖玄关+回看客厅
-    _ENTRANCE_SCAN_POINT = {"X": 680.0, "Y": -90.0, "Z": 0.0}
+    # 补盲扫点（R17-R19 漏件复盘）：茶几/沙发西侧是出生点 4×90° 的遮挡
+    # 死区（漏件 @(591,277)/(604,469)/(436,192) 均在此象限），走到
+    # 茶几-沙发之间补扫一轮
+    _SWEEP_POINT = {"X": 470.0, "Y": 420.0, "Z": 0.0}
     _PAIR_DIST = 50.0        # 鞋成对判定的最大间距（cm，实测一双两脚相距 9~11cm）
     _PAIR_DIM_TOL = 12.0     # 鞋成对判定的尺寸容差（cm）
 
@@ -570,30 +569,23 @@ class TidyroomAgent(VLMAgent):
                     logger.warning("预算剩余 {:.0f}s 不足一件，收工", remain)
                     break
                 self._execute_one()
+                # 确认帧并入的新物体 → 规则补分类 + 队列刷新（R18-33 教训）
+                self._apply_rule_categories()
+                self._rebuild_queue()
                 continue
-            # 队列空：二轮扫描死角兜底（全部候选已处理时跳过——v5b 实测
-            # 白转 13s 纯烧时间分）。v5d：先走到玄关簇近旁再扫并发 VLM
-            # （换位可见遮挡死区；戳若为固定像素渲染则绑号无增益，
-            # 实测裁决——§7-29）
-            if self._scan_round < self._SCAN_ROUNDS \
-                    and (_FORCE_ROUND2 or not self._all_candidates_done()):
-                logger.info("队列空，走玄关近扫（第 {} 轮）", self._scan_round + 1)
+            # 队列空：补盲扫（R17-R19 漏件教训：茶几/沙发西侧是出生点
+            # 扫描的遮挡死区；走过去补一轮 + 规则定类，新件自动入队，
+            # 歧义件走到场确认）。约 +8s/轮，换回可能漏掉的 13 分/件。
+            if self._scan_round < self._SCAN_ROUNDS:
+                logger.info("队列空，走客厅西侧补盲扫（第 {} 轮）",
+                            self._scan_round + 1)
                 mv = self._call_with_timeout(
                     self.tongsim.move_to_location, self.character_id,
-                    dict(self._ENTRANCE_SCAN_POINT), default={},
+                    dict(self._SWEEP_POINT), default={},
                 )
                 if not self._ok(mv):
-                    logger.info("玄关走位失败({})，原地扫描", self._err(mv))
-                self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=True)
-                # 短 gate：解锁收割玄关帧的票后重新定案（识别已锁定的
-                # 部分不受影响——新票只作用于未处理候选）
-                self._locked = False
-                deadline = time.time() + 15.0
-                while self._vlm_futs and time.time() < deadline:
-                    self._harvest_vlm(block=True,
-                                      timeout=max(0.5, deadline - time.time()))
-                self._harvest_vlm(block=False)
-                self._vlm_futs = []
+                    logger.info("补盲扫走位失败({})，原地扫", self._err(mv))
+                self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=False)
                 self._apply_rule_categories()
                 self._finalize_recognition()
                 self._rebuild_queue()
@@ -1443,6 +1435,15 @@ class TidyroomAgent(VLMAgent):
                 self.tongsim.acquire_first_person_perception, self.character_id,
                 self._HI_W, self._HI_H, default={},
             )
+            # 感知合并进 world（R18-33 教训：确认帧看到的物体/更完整 AABB
+            # 不能丢弃——走到场边的视野正是补盲来源，主循环每件后会重分类）
+            for obj in p.get("objects", []) or []:
+                oid2 = str(obj.get("object_id", ""))
+                if not oid2:
+                    continue
+                prev = self._world.get(oid2)
+                if prev is None or self._vol(obj) > self._vol(prev):
+                    self._world[oid2] = obj
             img_b64 = p.get("image", "")
             if _SAVE_FRAMES and img_b64:
                 self._save_frame(f"confirm_cls_{oid}", img_b64,
