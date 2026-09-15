@@ -502,7 +502,24 @@ class TidyroomAgent(VLMAgent):
     # 流水线主循环
     # ------------------------------------------------------------------ #
 
+    def _wait_scene_ready(self) -> None:
+        """UE 语义注册表就绪等待（队友核验包同款，v5a 0 分教训）：
+        UE 慢加载时首帧可能只有 3~11 个物体，直接扫会把废帧当全世界。
+        首帧 <20 物体重试至多 8 次（每次 2s）；仍不足则照常开扫
+        （真退化轮只能全栈重启，等待无意义）。"""
+        for attempt in range(8):
+            p = self._call_with_timeout(
+                self.tongsim.acquire_first_person_perception, self.character_id,
+                1280, 720, default={},
+            )
+            n = len(p.get("objects", []) or [])
+            if n >= 20:
+                return
+            logger.warning("场景注册表未就绪 ({}/8, {} 物体)，重试", attempt + 1, n)
+            time.sleep(2.0)
+
     def _pipeline(self) -> None:
+        self._wait_scene_ready()
         if _V4:
             self._pipeline_v4()
         else:
@@ -541,8 +558,10 @@ class TidyroomAgent(VLMAgent):
                     break
                 self._execute_one()
                 continue
-            # 队列空：二轮扫描死角兜底（不发 VLM；新候选按规则+到场确认）
-            if self._scan_round < self._SCAN_ROUNDS:
+            # 队列空：二轮扫描死角兜底（全部候选已处理时跳过——v5b 实测
+            # 白转 13s 纯烧时间分）
+            if self._scan_round < self._SCAN_ROUNDS \
+                    and not self._all_candidates_done():
                 logger.info("队列空，触发第 {} 轮扫描", self._scan_round + 1)
                 self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=False)
                 self._apply_rule_categories()
@@ -586,9 +605,14 @@ class TidyroomAgent(VLMAgent):
             break
 
     def _all_candidates_done(self) -> bool:
-        """world 中所有尺寸合格的可搬候选是否都已处理（placed/拉黑/放弃）。"""
+        """world 中所有尺寸合格的可搬候选是否都已处理（placed/拉黑/放弃）。
+
+        已解析容器（垃圾桶等尺寸可过物品筛选）不算候选——v5c 教训：
+        桶 18 号让本判定永假，二轮扫描每轮白转 5~13s。
+        """
+        cont_oids = {str(c.get("object_id")) for c in self._containers.values()}
         for oid, obj in self._world.items():
-            if oid in self._done_oids:
+            if oid in self._done_oids or oid in cont_oids:
                 continue
             if self._is_point(obj) or self._too_high(obj):
                 continue
@@ -1439,25 +1463,37 @@ class TidyroomAgent(VLMAgent):
         return self._categories.get(oid) or (top[0] if top else "")
 
     def _put_with_retry(self, task: dict) -> bool:
-        """放置链 v3（实机观察修正，2026-09-14 run11）：
+        """放置链 v5（2026-09-16，队友 98.11 分实证）：
 
-        move_and_put_down 的 move 点不控制朝向，人物到达后按行进方向放手，
-        物体释放在"人物面前"——没正对容器就全掉在旁边地上（run11 杯子全灭）。
-        而 put_down_sth 是强制坐标放置（run11 的 33 号被它直接"穿模"送进
-        茶几内部）。故组合：
-          move_to_object(容器) → 到达即面向容器
-          put_down_sth(容器 AABB 内部点, force_locate) → 物体直接出现在容器体内
+        put_down_sth(force_locate) 是远距传送，**不要求人物靠近容器**——
+        v3 的 move_to_object(容器) 走位每件多花 4~8s 属冗余。改为第一遍
+        原地直放（主点/备点）；全失败才走近容器按 v3 老链重试兜底。
+        历史教训仍有效：move_and_put_down 的 move 点不控朝向会掉在旁边
+        地上（run11），本链不用它；put_down_sth 是强制坐标放置可穿模
+        （run11 33 号实证），确认逻辑复刻判卷几何（§7-6）。
         """
         cont = self._containers.get(task["cont_key"])
         if cont is None:
             return False
-        move = self._call_with_timeout(
-            self.tongsim.move_to_object, self.character_id,
-            str(cont.get("object_id", "")), default={},
+        if self._put_pass(task, cont, walk=False):
+            return True
+        if self._put_pass(task, cont, walk=True):
+            return True
+        # 两遍都没确认成功：原地放下防卡手
+        self._call_with_timeout(
+            self.tongsim.put_down_sth, self.character_id,
+            target_location=task["put_retry"], auto_rotate=True, default={},
         )
-        if not self._ok(move):
-            logger.info("move_to_object({}) 失败: {}", task["cont_key"], self._err(move))
+        return False
 
+    def _put_pass(self, task: dict, cont: dict, walk: bool) -> bool:
+        if walk:
+            move = self._call_with_timeout(
+                self.tongsim.move_to_object, self.character_id,
+                str(cont.get("object_id", "")), default={},
+            )
+            if not self._ok(move):
+                logger.info("move_to_object({}) 失败: {}", task["cont_key"], self._err(move))
         for label, point in (("内部点", task["put"]), ("内部点2", task["put_retry"])):
             put = self._call_with_timeout(
                 self.tongsim.put_down_sth, self.character_id,
@@ -1476,11 +1512,6 @@ class TidyroomAgent(VLMAgent):
                 )
                 if not self._ok(retake):
                     return False
-        # 两个点都没确认成功：原地放下防卡手
-        self._call_with_timeout(
-            self.tongsim.put_down_sth, self.character_id,
-            target_location=task["put_retry"], auto_rotate=True, default={},
-        )
         return False
 
     def _confirm_placed(self, oid: str, cont_key: str) -> bool:
