@@ -48,6 +48,11 @@ from arenaagent.utils.configclass import configclass  # noqa: E402
 from arenaagent.vlm_agent.json_parsor import extract_last_json_from_text  # noqa: E402
 from arenaagent.vlm_agent.vlm_agent import VLMAgent, VLMAgentCfg  # noqa: E402
 
+try:
+    from cqairace import dashcam as _dashcam
+except Exception:  # noqa: BLE001  cv2/numpy 缺失时降级为存原图
+    _dashcam = None
+
 TRACE_DIR = _REPO_ROOT / "temp" / "p4_tidyroom"
 SESSIONS_DIR = _REPO_ROOT / "temp" / "p4_tidyroom" / "test_sessions"
 
@@ -159,6 +164,8 @@ class TidyroomAgent(VLMAgent):
         self._blacklist: set[str] = set()
         self._placed = 0
         self._gave_up = 0
+        self._gave_up_oids: set[str] = set()
+        self._pair_cats: set[str] = set()         # 鞋成对启发改判的物体
         self._placements: list[dict] = []              # 放置明细(复盘用)
         self._session_dir: Path | None = None  # 本轮档案目录(首次落盘时创建)
 
@@ -345,7 +352,7 @@ class TidyroomAgent(VLMAgent):
             for i in range(4):
                 p = self._call_with_timeout(
                     self.tongsim.acquire_first_person_perception, self.character_id,
-                    1280, 720, default={})
+                    2560, 720, default={})
                 if p.get("image"):
                     TRACE_DIR.mkdir(parents=True, exist_ok=True)
                     (TRACE_DIR / f"scout_{i}.jpg").write_bytes(
@@ -486,10 +493,39 @@ class TidyroomAgent(VLMAgent):
     # 扫描（每帧即时异步发 VLM）
     # ------------------------------------------------------------------ #
 
-    def _save_frame(self, tag: str, b64: str) -> None:
+    def _dashcam_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        """行车记录仪标注用：oid → (标签文字, 颜色键)。"""
+        labels: dict[str, str] = {}
+        colors: dict[str, str] = {}
+        placed_oids = {pl["oid"] for pl in self._placements}
+        for oid, cat in self._categories.items():
+            labels[oid] = cat
+            if oid in self._blacklist:
+                colors[oid] = "blacklist"
+            elif oid in placed_oids:
+                colors[oid] = "placed"
+            elif oid in self._gave_up_oids:
+                colors[oid] = "gaveup"
+            elif oid in self._pair_cats:
+                colors[oid] = "pair"
+            elif oid in self._rule_cats:
+                colors[oid] = "rule"
+            else:
+                colors[oid] = "vlm"
+        for key, cont in self._containers.items():
+            coid = str(cont.get("object_id", ""))
+            if coid and coid != "?":
+                labels.setdefault(coid, f"cont:{key}")
+                colors[coid] = "container"
+        return labels, colors
+
+    def _save_frame(self, tag: str, b64: str,
+                    objects: list[dict] | None = None) -> None:
         """感知图落盘：temp/p4_tidyroom/test_sessions/{时间戳[_标签]}/frame_*.jpg。
 
         每轮独立目录（目录规范：test/train 逐轮归档，含 meta 汇总）。
+        dashcam 可用时存 YOLO 式标注帧 + 逐帧感知元数据 json；标注失败
+        回退存原图，任何异常不影响任务主流程。
         """
         if not _SAVE_FRAMES or not b64:
             return
@@ -500,6 +536,12 @@ class TidyroomAgent(VLMAgent):
                     name = f"{name}_{_RUN_TAG}"
                 self._session_dir = SESSIONS_DIR / name
             self._session_dir.mkdir(parents=True, exist_ok=True)
+            if _dashcam is not None and objects is not None:
+                labels, colors = self._dashcam_maps()
+                _dashcam.save_frame(self._session_dir, tag,
+                                    base64.b64decode(b64), objects,
+                                    labels, colors)
+                return
             (self._session_dir / f"frame_{tag}.jpg").write_bytes(base64.b64decode(b64))
         except Exception:  # noqa: BLE001  落盘失败不影响任务
             pass
@@ -514,7 +556,17 @@ class TidyroomAgent(VLMAgent):
                     1280, 720, default={},
                 )
                 objects = p.get("objects", []) or []
-                self._save_frame(f"scan_r{self._scan_round}_{i}", p.get("image", ""))
+                img = p.get("image", "")
+                if _SAVE_FRAMES and objects and img:
+                    # 行车记录仪专用全分辨率帧（原生 2560x720，数字编号
+                    # 约 2 倍大，OCR/人工复盘都更可靠）；生产路径不受影响
+                    hi = self._call_with_timeout(
+                        self.tongsim.acquire_first_person_perception,
+                        self.character_id, 2560, 720, default={},
+                    )
+                    if hi.get("image"):
+                        img = hi["image"]
+                self._save_frame(f"scan_r{self._scan_round}_{i}", img, objects)
                 for obj in objects:
                     oid = str(obj.get("object_id", ""))
                     if not oid:
@@ -755,6 +807,7 @@ class TidyroomAgent(VLMAgent):
                     old = self._categories.get(oid)
                     self._categories[oid] = "shoe"
                     self._rule_cats.add(oid)
+                    self._pair_cats.add(oid)
                     logger.info("鞋成对启发: {} ({}) 紧邻鞋 {} 且尺寸相近 → 改判 shoe",
                                 oid, old, soid)
                     break
@@ -950,6 +1003,7 @@ class TidyroomAgent(VLMAgent):
                         sec=round(time.time() - t1, 1))
         else:
             self._gave_up += 1
+            self._gave_up_oids.add(oid)
             logger.warning("件放弃 {} ({})", oid, task["cont_key"])
             self._trace("gave_up", oid=oid, cat=task["cat"], cont=task["cont_key"])
 
@@ -1015,7 +1069,15 @@ class TidyroomAgent(VLMAgent):
             self.tongsim.acquire_first_person_perception, self.character_id,
             1280, 720, default={},
         )
-        self._save_frame(f"confirm_{oid}", p.get("image", ""))
+        img = p.get("image", "")
+        if _SAVE_FRAMES and img:
+            hi = self._call_with_timeout(
+                self.tongsim.acquire_first_person_perception,
+                self.character_id, 2560, 720, default={},
+            )
+            if hi.get("image"):
+                img = hi["image"]
+        self._save_frame(f"confirm_{oid}", img, p.get("objects", []) or [])
         if not p.get("image"):
             logger.warning("确认感知失败（UE 卡顿?），按未确认处理")
             return False

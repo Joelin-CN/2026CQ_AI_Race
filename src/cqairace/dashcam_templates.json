@@ -1,0 +1,40 @@
+{
+ "templates": [
+  {
+   "digit": "3",
+   "bitmap": "H/g//H/8P/w//Bj8APgA+AP4B/gH+Af4A/wAfAAeAB8gHnw+fj5//H/8P/wHwAMA",
+   "h": 24,
+   "w": 16
+  },
+  {
+   "digit": "4",
+   "bitmap": "AAAAIABgAeAB4AHgA+AH4AZgLmA+cD5wfnz//Pv8//9//wB8AHwAeABgAEAAAAAA",
+   "h": 24,
+   "w": 16
+  },
+  {
+   "digit": "7",
+   "bitmap": "AEAD4Af4ABgAHgAeAB4AHgB+APwA/AD4AfgD4AfgB8AHwAfAB8AHAAcABgAAAAAA",
+   "h": 24,
+   "w": 16
+  },
+  {
+   "digit": "1",
+   "bitmap": "B+AH4AfgH+A/4P/g/+D/4AfgA+AD4APgA+AH4AfgB+AH4AfgB+D//////////n/+",
+   "h": 24,
+   "w": 16
+  },
+  {
+   "digit": "0",
+   "bitmap": "H+Af+D/4//z//Pz/+H/4f+D/4P/g//kf+R//H/8f/h/4H/gf/D//fP/8P/wf4B/g",
+   "h": 24,
+   "w": 16
+  },
+  {
+   "digit": "9",
+   "bitmap": "AAAAAAAAAAAAAAAAAAAACAAwACIADwCNAJ8P/g/+P/w/nAgAAAAAAAAAAAAAAAAA",
+   "h": 24,
+   "w": 16
+  }
+ ]
+}
