@@ -394,3 +394,18 @@ def test_mid_size_no_rule_still_none():
     a = v4_agent([mid])
     a._apply_rule_categories()
     assert "35" not in a._categories
+
+
+def test_big_prior_bounded_and_chair_excluded():
+    # R25 教训：大件先验曾把冰箱/沙发/餐椅等 29 个家具全标 pillow
+    chair = obj("22", shape="chair", dz=80, dx=61, dy=61)
+    chair["color"] = "gray"
+    fridge = obj("7", shape="Unknown", dz=160, dx=29, dy=51)
+    fridge["color"] = "Unknown"
+    big_square = obj("33", shape="square", dz=53, dx=65, dy=63)  # 可搬区间内
+    big_square["color"] = "white"
+    a = v4_agent([chair, fridge, big_square])
+    a._apply_rule_categories()
+    assert "22" not in a._categories       # chair 拉黑
+    assert "7" not in a._categories        # >80cm 超出可搬区间不判
+    assert a._categories["33"] == "pillow"  # 65cm 在 40~80 区间内

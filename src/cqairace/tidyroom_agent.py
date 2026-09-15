@@ -153,8 +153,9 @@ class TidyroomAgent(VLMAgent):
                               # 28/52/53/55/57/58/60 全类：吊灯/墙板/横杆/挂墙盒
                               # z0=129~288，R12-58 教训）；容器最高茶几 z16 兼容
     # 场景道具 shape（test R12 复盘：40 号=玄关盆栽 shape=plant 21×21×36，
-    # 不可交互且非五类物品——按 shape 拉黑，id 跨轮不稳不可用）
-    _SCENE_PROP_SHAPES = {"plant"}
+    # 不可交互且非五类物品——按 shape 拉黑，id 跨轮不稳不可用；
+    # R25 教训：chair（61×61×80 餐椅恰卡 80cm 队列线）曾落大件先验）
+    _SCENE_PROP_SHAPES = {"plant", "chair"}
     # 补盲扫点（R17-R19 漏件复盘）：茶几/沙发西侧是出生点 4×90° 的遮挡
     # 死区（漏件 @(591,277)/(604,469)/(436,192) 均在此象限），走到
     # 茶几-沙发之间补扫一轮
@@ -1163,8 +1164,9 @@ class TidyroomAgent(VLMAgent):
         if max(self._dims(obj)) < self._TINY_DIM:
             return "trash"
         # 大件先验（R24-33 教训：57cm 灰方块确认成 trash——历史可搬大件
-        # ≥40cm 只有抱枕）：无形状规则命中的大件按 pillow
-        if max(self._dims(obj)) >= self._BIG_DIM:
+        # ≥40cm 只有抱枕）：**限定可搬尺寸区间**（<_MAX_ITEM_DIM），否则
+        # R25 污染——冰箱/沙发/墙板等超大件也全部落进 pillow
+        if self._BIG_DIM <= max(self._dims(obj)) < self._MAX_ITEM_DIM:
             return "pillow"
         return None
 

@@ -484,3 +484,13 @@
       进容器，帧里自然看不见——R24 复盘发现）——新增 `_execute_one`
       拿起成功后立刻拍 `frame_took_{oid}.jpg` 近距帧（1280，~1.3s/件，
       仅 _SAVE_FRAMES 时），供人工核对"搬走的到底是什么"。
+36. **大件先验污染修正（2026-09-16，R25 抓现行）**：大件先验首版
+    （≥40 即 pillow）把 **29 个家具**（冰箱/沙发/餐桌/餐椅/墙板…）
+    全标成 pillow（`_apply_rule_categories` 无尺寸上限）；该轮靠队列
+    的 max≤80 过滤侥幸零损失（4 件放置全对），但 61×61×80 餐椅恰卡
+    队列线。修正：①`chair` 加 `_SCENE_PROP_SHAPES`；②先验限定
+    **40≤max<80 可搬区间**。R25 顺带验证：大件先验命中真件（33 号
+    white/square 65cm→pillow→沙发 ✓）、`frame_took_*` 拿起帧四张全
+    生成（记录仪修复生效）、补盲扫 +2 件（54 红苹果→桌、53 枕→沙发）。
+    34 号 beige/cylindrical 17×26×9（新 shape 词"cylindrical"）确认
+    trash 进桶，真伪待复盘 frame_took_34.jpg。
