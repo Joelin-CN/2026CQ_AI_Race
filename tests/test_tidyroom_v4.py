@@ -459,3 +459,28 @@ def test_sandal_is_shoe_and_big_cylinder_grounded():
     assert a._categories["52"] == "shoe"       # 凉鞋直判鞋柜
     assert "11" not in a._categories           # 101cm 绿植不判
     assert a._categories["33"] == "pillow"     # 45cm 颈枕不受影响
+
+
+def test_paper_scrap_flat_object_to_trash():
+    # R29 用户定案：59/61 号 [10,10,0] 零高度平面物=纸屑档，直判垃圾桶；
+    # 全退化 [0,0,0] 点标记仍被排除
+    scrap1 = obj("59", shape="irregular", dz=0, dx=10, dy=10)
+    scrap1["color"] = "white"
+    scrap2 = obj("61", shape="irregular", dz=0, dx=10, dy=10)
+    scrap2["color"] = "white"
+    marker = {"object_id": "9", "color": "Unknown", "shape": "Unknown",
+              "place_location": {"X": 1, "Y": 1, "Z": -10},
+              "world_aabb": {"min": {"x": 1, "y": 1, "z": -10},
+                              "max": {"x": 1, "y": 1, "z": -10}}}
+    a = v4_agent([scrap1, scrap2, marker])
+    assert not a._is_point(scrap1) and a._is_point(marker)
+    a._apply_rule_categories()
+    assert a._categories["59"] == "trash" and a._categories["61"] == "trash"
+    assert "9" not in a._categories
+    a._containers = {"trash_bin": obj("18", shape="box", dz=35, dx=27, dy=27)}
+    a._container_slots = {}
+    a._pair_cats = set()
+    a._pair_shoes = lambda: None
+    a._ambiguous = set()
+    a._rebuild_queue()
+    assert {"59", "61"} <= {t["oid"] for t in a._queue}   # 纸屑入队进桶

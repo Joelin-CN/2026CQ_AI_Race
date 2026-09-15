@@ -1138,6 +1138,10 @@ class TidyroomAgent(VLMAgent):
             return None
         shape = str(obj.get("shape", "")).lower()
         color = str(obj.get("color", "")).lower()
+        # 纸屑档（R29 用户定案：零高度平面物 [10,10,0] 独一档直判垃圾桶；
+        # 若实为场景贴花，take 秒拒零成本）
+        if min(self._dims(obj)) <= 0:
+            return "trash"
         if shape in ("boot", "shoe"):
             return "shoe"
         if shape == "cylinder":
@@ -1369,7 +1373,7 @@ class TidyroomAgent(VLMAgent):
             if obj is None:
                 continue
             dx, dy, dz = self._dims(obj)
-            if max(dx, dy, dz) > self._MAX_ITEM_DIM or min(dx, dy, dz) < self._MIN_DIM:
+            if max(dx, dy, dz) > self._MAX_ITEM_DIM or self._is_point(obj):
                 continue
             if min(dx, dy, dz) >= self._FURNITURE_MIN_DIM:
                 continue  # 块状家具厚度（椅 61×61×80）不入队
@@ -1715,7 +1719,9 @@ class TidyroomAgent(VLMAgent):
 
     @classmethod
     def _is_point(cls, obj: dict) -> bool:
-        return min(cls._dims(obj)) < cls._MIN_DIM
+        # 三维全退化才是点标记（墙角 [0,0,0]）；R29-59/61 纸屑 [10,10,0]
+        # 有面积无高度，是物品不是标记（用户复盘定案：纸屑档→垃圾桶）
+        return max(cls._dims(obj)) < cls._MIN_DIM
 
     @classmethod
     def _too_high(cls, obj: dict) -> bool:
