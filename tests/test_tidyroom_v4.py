@@ -359,3 +359,16 @@ def test_can_rul_still_works_for_tiny_cylinder():
     a = v4_agent([can])
     a._apply_rule_categories()
     assert a._categories["33"] == "cup"
+
+
+def test_ring_and_slice_are_food():
+    # R23 用户复盘：33 ring(甜甜圈 31×32×11)/34 slice(切片 16×3×16) 是
+    # food→茶几，曾被极小兜底误送桶；slice 16cm 须先于极小兜底命中
+    donut = obj("33", shape="ring", dz=11, dx=31, dy=32)
+    donut["color"] = "brown"
+    sl = obj("34", shape="slice", dz=16, dx=16, dy=3)
+    sl["color"] = "brown"
+    a = v4_agent([donut, sl])
+    a._apply_rule_categories()
+    assert a._categories["33"] == "food"
+    assert a._categories["34"] == "food"

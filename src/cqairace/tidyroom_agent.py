@@ -1135,11 +1135,15 @@ class TidyroomAgent(VLMAgent):
             return "trash"
         if shape == "round":
             return "food"
-        # 词汇直判（R22-57 red drumstick=鸡腿、R14/19-34 brown rock=石块）
+        # 词汇直判（R22-57 red drumstick=鸡腿、R14/19-34 brown rock=石块、
+        # R23 用户复盘：33 ring=甜甜圈/34 slice=切片食物——两件曾被极小
+        # 兜底误送垃圾桶）
         if shape == "rock":
             return "trash"
         if shape == "drumstick":
             return "food" if max(self._dims(obj)) >= self._TINY_DIM else "trash"
+        if shape in ("ring", "slice"):
+            return "food"
         # shape 覆盖缺口补齐（§7-18：R11 的 36 号黑枕 shape=pillow 无分支，
         # VLM 全挂轮漏分类）：pillow 须 ≥_PILLOW_MIN_DIM（小 pillow 形件
         # 走末尾极小兜底进垃圾桶）
