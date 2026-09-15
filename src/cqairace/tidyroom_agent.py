@@ -90,6 +90,9 @@ _ENUM_PILLOW = os.environ.get("TIDYROOM_ENUM_PILLOW", "") not in ("", "0", "fals
 _SAVE_FRAMES = os.environ.get("TIDYROOM_SAVE_FRAMES", "") not in ("", "0", "false")
 # v4 识别管线开关（=0 回退 v3 旧整帧流水线：A/B 对比与回退开关）
 _V4 = os.environ.get("TIDYROOM_V4", "1") not in ("", "0", "false")
+# 强制二轮玄关近扫（实验开关：finalize 后候选必全部入队，正常路径
+# 二轮永不触发；=1 时无条件走玄关近扫+VLM，用于实测绑号增益）
+_FORCE_ROUND2 = os.environ.get("TIDYROOM_FORCE_ROUND2", "") not in ("", "0", "false")
 # 轮次标签：编入本轮目录名（如 test_r4 / train_a；缺省用纯时间戳）
 _RUN_TAG = os.environ.get("TIDYROOM_RUN_TAG", "")
 
@@ -144,6 +147,9 @@ class TidyroomAgent(VLMAgent):
     # 场景道具 shape（test R12 复盘：40 号=玄关盆栽 shape=plant 21×21×36，
     # 不可交互且非五类物品——按 shape 拉黑，id 跨轮不稳不可用）
     _SCENE_PROP_SHAPES = {"plant"}
+    # 玄关近扫点（§7-24 全图）：鞋簇 (705~810,-137) 与鞋柜 (780,-144)
+    # 之间的空位，离出生点 ~90cm，四向转身可覆盖玄关+回看客厅
+    _ENTRANCE_SCAN_POINT = {"X": 680.0, "Y": -90.0, "Z": 0.0}
     _PAIR_DIST = 50.0        # 鞋成对判定的最大间距（cm，实测一双两脚相距 9~11cm）
     _PAIR_DIM_TOL = 12.0     # 鞋成对判定的尺寸容差（cm）
 
@@ -566,11 +572,28 @@ class TidyroomAgent(VLMAgent):
                 self._execute_one()
                 continue
             # 队列空：二轮扫描死角兜底（全部候选已处理时跳过——v5b 实测
-            # 白转 13s 纯烧时间分）
+            # 白转 13s 纯烧时间分）。v5d：先走到玄关簇近旁再扫并发 VLM
+            # （换位可见遮挡死区；戳若为固定像素渲染则绑号无增益，
+            # 实测裁决——§7-29）
             if self._scan_round < self._SCAN_ROUNDS \
-                    and not self._all_candidates_done():
-                logger.info("队列空，触发第 {} 轮扫描", self._scan_round + 1)
-                self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=False)
+                    and (_FORCE_ROUND2 or not self._all_candidates_done()):
+                logger.info("队列空，走玄关近扫（第 {} 轮）", self._scan_round + 1)
+                mv = self._call_with_timeout(
+                    self.tongsim.move_to_location, self.character_id,
+                    dict(self._ENTRANCE_SCAN_POINT), default={},
+                )
+                if not self._ok(mv):
+                    logger.info("玄关走位失败({})，原地扫描", self._err(mv))
+                self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=True)
+                # 短 gate：解锁收割玄关帧的票后重新定案（识别已锁定的
+                # 部分不受影响——新票只作用于未处理候选）
+                self._locked = False
+                deadline = time.time() + 15.0
+                while self._vlm_futs and time.time() < deadline:
+                    self._harvest_vlm(block=True,
+                                      timeout=max(0.5, deadline - time.time()))
+                self._harvest_vlm(block=False)
+                self._vlm_futs = []
                 self._apply_rule_categories()
                 self._finalize_recognition()
                 self._rebuild_queue()
