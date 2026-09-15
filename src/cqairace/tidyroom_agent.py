@@ -120,6 +120,19 @@ class TidyroomAgent(VLMAgent):
     _PAIR_DIST = 50.0        # 鞋成对判定的最大间距（cm，实测一双两脚相距 9~11cm）
     _PAIR_DIM_TOL = 12.0     # 鞋成对判定的尺寸容差（cm）
 
+    # 静态容器先验（2026-09-15 决策）：test/train 同一 UE 地图，仅物品随机
+    # 撒、容器几何跨轮逐毫米稳定（R9/R10 茶几放点一致；R11 逐帧 AABB 实测，
+    # 与队友核验包坐标三方互证）。先验=容器的世界坐标锚点，用于：
+    # ①规则候选中优先取先验附近者（替代纯体积最大）②校正 VLM 投票的
+    # 远偏选择（R9 教训：体积顶替把 table 从茶几翻到别处）③规则/VLM
+    # 全失效时兜底。坐标单位 cm，xy 为 AABB 中心。
+    _STATIC_CONTAINERS: dict[str, tuple[float, float, float]] = {
+        "table": (577.0, 365.0, 200.0),        # 茶几 brown rect 72x137x29 z16-45（R11 id15）
+        "sofa": (282.0, 374.0, 250.0),         # 主沙发 gray rect 112x410x99 z0-99（R11 id14）
+        "trash_bin": (814.0, 267.0, 120.0),    # 垃圾桶 black box 27x27x35 z4-39（R11 id18）
+        "shoe_cabinet": (780.0, -144.0, 200.0),  # 玄关窄深鞋柜 109x23x60 z3-63（R11 id46）
+    }
+
     _pool = ThreadPoolExecutor(max_workers=2)       # tongsim 调用超时兜底
     _vlm_pool = ThreadPoolExecutor(max_workers=4)   # 帧 VLM 并行分类
 
@@ -872,12 +885,64 @@ class TidyroomAgent(VLMAgent):
                         logger.info("shoe_cabinet VLM 结果非窄深柜({:.0f}x{:.0f}x{:.0f})，规则校正",
                                     dx, dy, dz)
                         resolved[ctype] = rule
+        # 静态先验校正：先验附近找不到可用容器时兜底填充；已选容器偏离
+        # 先验超过容差（体积顶替/误投）时以先验为准——容器选择从此确定化
+        for ctype in self._STATIC_CONTAINERS:
+            prior = self._prior_container(ctype)
+            if prior is None:
+                continue
+            cur = resolved.get(ctype)
+            if cur is None:
+                resolved[ctype] = prior
+                continue
+            px, py, tol = self._STATIC_CONTAINERS[ctype]
+            cx, cy, _ = self._bb_center(cur)
+            if ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5 > tol:
+                logger.info("容器 {} 选中 {}@({:.0f},{:.0f}) 偏离静态先验"
+                            "({:.0f},{:.0f})超 {:.0f}cm，先验校正",
+                            ctype, cur.get("object_id"), cx, cy, px, py, tol)
+                resolved[ctype] = prior
         # 防倒退：已有容器不被规则清空
         for k, v in resolved.items():
             self._containers[k] = v
 
+    def _prior_container(self, ctype: str) -> dict | None:
+        """静态先验锚定的容器选择：先验坐标附近（容差内）尺寸几何可信者。
+
+        与 _rule_container 的颜色判据无关（color 元数据可为 Unknown），
+        只按类别尺寸盒过滤——规则/VLM 全失效时仍能按坐标找到容器。
+        """
+        prior = self._STATIC_CONTAINERS.get(ctype)
+        if prior is None:
+            return None
+        px, py, tol = prior
+        best, best_d = None, float("inf")
+        for obj in self._world.values():
+            if self._is_point(obj) or self._too_high(obj):
+                continue
+            dx, dy, dz = self._dims(obj)
+            if ctype == "table":
+                hit = 25 <= dz <= 55 and 60 <= max(dx, dy) <= 200
+            elif ctype == "sofa":
+                hit = max(dx, dy) >= 200 and dz < 130
+            elif ctype == "trash_bin":
+                hit = max(dx, dy, dz) <= 70 and 15 <= dz <= 60
+            elif ctype == "shoe_cabinet":
+                hit = 45 <= dz <= 115 and 15 <= min(dx, dy) <= 50
+            else:
+                hit = False
+            if not hit:
+                continue
+            cx, cy, _ = self._bb_center(obj)
+            d = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+            if d < min(best_d, tol):
+                best, best_d = obj, d
+        return best
+
     def _rule_container(self, ctype: str) -> dict | None:
-        best, best_vol = None, 0.0
+        best, best_vol, best_d = None, 0.0, float("inf")
+        best_far, best_far_vol = None, 0.0
+        prior = self._STATIC_CONTAINERS.get(ctype)
         for oid, obj in self._world.items():
             color = str(obj.get("color", "")).lower()
             shape = str(obj.get("shape", "")).lower()
@@ -898,8 +963,22 @@ class TidyroomAgent(VLMAgent):
                 # （2026-09-15 R5 教训：厨房柜被误认鞋柜，2 件鞋放灶台 0 计分）
                 hit = color == "brown" and shape == "rectangle" \
                     and 50 <= dz <= 110 and 20 <= min(dx, dy) <= 45
-            if hit and self._vol(obj) > best_vol:
+            if not hit:
+                continue
+            if prior is not None:
+                # 规则命中者中优先取先验附近（替代纯体积最大，防大件顶替）；
+                # 容差外命中留作换地图时的自适应回退
+                px, py, tol = prior
+                cx, cy, _ = self._bb_center(obj)
+                d = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+                if d <= tol and d < best_d:
+                    best, best_d, best_vol = obj, d, self._vol(obj)
+                elif d > tol and self._vol(obj) > best_far_vol:
+                    best_far, best_far_vol = obj, self._vol(obj)
+            elif self._vol(obj) > best_vol:
                 best, best_vol = obj, self._vol(obj)
+        if best is None and best_far is not None:
+            best = best_far
         if ctype == "shoe_cabinet":
             near = self._nearest_shoe_container(best)
             if near is not None:
