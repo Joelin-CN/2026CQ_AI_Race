@@ -418,3 +418,12 @@ uv run arenaagent --agent_name preliminary_baseline_agent --config config.toml `
 （tidyroom=R13，其余沿用 09-15pm 最优），`package-results` 重打包成功
 （SHA-256 前 16 位 47e7e700821aa729），待上传官网。预估 R13≈81~82 分
 （满完成度 80+时间分 ~1.5），待官网出分校验。
+
+**tidyroom 收官（2026-09-16 05:14）**：R27-R32 六轮连测驱动 sandal 词汇/
+确认层裁剪根因（全幅+特征锚定 prompt，A/B 五错案翻案）/纸屑档/基座高度
+30→110（家具顶面物品合法）/cylindrical→cup/尺寸上限 100+家具厚度 58 六项
+定案（§7-40~45）。**最终 bin 采用 R32**（placed 5 零放弃 ~90s），入包
+`submission_20260916_final/`（package-results 重打包成功，SHA-256 前缀
+c7eb5f82），五任务组合待上传官网。今晚累计 21 轮 test、50 单测、22 个
+bin 备份；漏件六通道与误判三类通道全部关闭。剩余唯一悬置：9:30 官网
+出分 → 时间分公式校准 →（如需）bin 择优微调。

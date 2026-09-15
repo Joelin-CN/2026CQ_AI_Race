@@ -571,3 +571,28 @@
     24cm 短圆柱 → cup 直判，绕开歧路。R25-34（17×26×9 同词）回溯
     应同为 cup。教训：确认层修复后仍非满分，词汇直判是这类 UE
     资产词的最短路径。
+45. **tidyroom 收官（2026-09-16 05:14，R32 bin 定案入包）**：R32
+    placed 5 零放弃（ring 二次命中/家具顶面第二例/triangle 新词走
+    大件先验），用户采纳为最终提交 bin。今晚 R12-R32 共 **21 轮 test**
+    驱动出 §7-19~44 共 26 个定案。**shape 词表终版全谱**：
+
+    | shape 词 / 特征 | 归类 | 首案例 |
+    |---|---|---|
+    | boot / shoe / sandal / slipper / loafer | shoe | R4/R27 |
+    | cylinder / cylindrical：短圆柱 / ≥35cm 细长 | cup / pillow | train 导览 / R31 |
+    | round / circle / ring / slice | food | R23/R28/R32 |
+    | rock / irregular | trash | R14/核桃先例 |
+    | drumstick：≥20cm / <20cm | food / trash | R22 |
+    | pillow 形（≥30 且 min<58）| pillow | R11/R22 界定 |
+    | beige/white rectangle（30~100 且 min<58）| pillow | 早期 |
+    | 无词形 40~100 且 min<58（square/box/triangle…）| pillow 大件先验 | R24-33 |
+    | 无词形 <20 | trash 极小兜底 | R22 |
+    | 零高度 [x,y,0] | trash 纸屑档 | R29 |
+    | plant / chair | 场景道具拉黑 | R12/R25 |
+    | 三维全退化 [0,0,0] | 点标记排除 | R11 |
+
+    尺寸三维界：min<1 排除（全退化）；min≥58 家具厚度排除；max>100
+    排除；基座高度 30→110（家具顶面 45~99 合法，背景构件 ≥129）。
+    漏件六通道全关（薄片/遮挡/盲区/尺寸/纸屑/家具顶面）。提交包
+    `submission_20260916_final/`（tidyroom=R32，SHA-256 前缀 c7eb5f82），
+    待上传官网；9:30 出分后校准时间分公式，如需再择优 bin 重打包。
