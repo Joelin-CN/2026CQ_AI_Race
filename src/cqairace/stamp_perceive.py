@@ -71,13 +71,18 @@ PROMPT_CLASSIFY_TMPL = (
 )
 
 PROMPT_CONFIRM_TMPL = (
-    "家居整理场景。图中是编号 {oid} 物体的近距离特写。"
-    "元数据：{color}/{shape}/{size}cm。\n"
-    "类别白名单：trash/cup/food/shoe/pillow（易拉罐算 cup；"
-    "≥30cm细长圆柱是颈枕算 pillow；穿在人脚上的鞋不算）。\n"
-    "尺寸硬约束：pillow 只能是 ≥30cm 的抱枕/靠垫/颈枕——比元数据尺寸"
-    "小的物件绝不判 pillow；<20cm 且不像杯罐/水果的小物优先 trash。\n"
-    '只输出 {{"{oid}":"..."}}。'
+    "家居整理场景。图是第一人称全视野，编号 {oid} 的目标物体在图内某处"
+    "（不一定居中）。目标特征——颜色:{color}，形状:{shape}，尺寸约 {size}cm。\n"
+    "请先按特征在图中找到该物体，再分类。类别白名单：trash/cup/food/shoe/"
+    "pillow（易拉罐算 cup；≥30cm细长圆柱是颈枕算 pillow；穿在人脚上的鞋"
+    "不算；图中其他物体一律忽略，只对目标分类）。\n"
+    "shape 词义提示（目标 shape 命中时优先按此判断）：boot/shoe/sandal/"
+    "slipper/loafer=鞋靴；round/circle/ring/slice=食物(水果/甜甜圈/切片)；"
+    "rock/irregular=垃圾碎屑；drumstick=鸡腿(食物)；square/box/rectangle="
+    "方块类(≥40cm多为抱枕,<20cm多为杂物)；其他未知词结合外观与尺寸判断。\n"
+    "尺寸硬约束：pillow 只能是 ≥30cm 的抱枕/靠垫/颈枕；<20cm 且不像杯罐/"
+    "水果的小物优先 trash。\n"
+    '只输出 {{"{oid}":"..."}}，找不到目标则给 other。'
 )
 
 
@@ -202,7 +207,14 @@ def build_grid(crops: dict[str, np.ndarray]) -> bytes:
 
 
 def confirm_image(img_bytes: bytes, oid: str) -> bytes | None:
-    """到场确认图：左面板中央 60% 裁剪 + 编号徽标（绑号结构性成立）。"""
+    """到场确认图：**整个左面板** + 编号徽标（绑号结构性成立）。
+
+    v2 修正（confirm_ab.py 实证）：旧版裁中央 20%~94%，但 move_to_object
+    不保证朝向——R27-52 的确认图里根本没有凉鞋（拍的是沙发+落地灯，
+    VLM 对视野中央的随机物体分类说 pillow，当晚全部确认错案同根因）。
+    物体出现在感知 objects 里 = 必在 120° 视野内的左面板某处，全幅
+    裁剪保证目标在图中，由 VLM 按元数据特征寻找。
+    """
     buf = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if img is None:
@@ -211,9 +223,7 @@ def confirm_image(img_bytes: bytes, oid: str) -> bytes | None:
     pw = w // 2
     if pw < 10:
         return None
-    x0, x1 = int(pw * 0.20), int(pw * 0.94)
-    y0, y1 = int(h * 0.18), int(h * 0.92)
-    crop = img[y0:y1, x0:x1]
+    crop = img[0:h, 4:pw - 4]
     cv2.rectangle(crop, (0, 0), (int(_BADGE_H * 1.9), _BADGE_H), (0, 0, 0), -1)
     cv2.putText(crop, oid, (5, _BADGE_H - 9), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
                 (0, 255, 255), 2)
