@@ -1,9 +1,20 @@
-"""P4 整理房间 agent v2：扫描/VLM/搬运流水线化 + 放置确认 + 二轮扫描。
+"""P4 整理房间 agent v4：识别 gate（裁剪自标+加权投票）→ 锁定 → 纯执行 + 到场确认。
 
-v1 教训（2026-09-14 train 六轮实测，见 temp/p4_tidyroom/ 与 v2-notes §7）：
-- VLM 串行等 115s 占总时长一半且常挂 → v2 改流水线：扫描逐帧即时异步发 VLM，
-  规则分类先行开搬（run6 实测规则兜底 5/5 全对），VLM 结果回来只做补充修正；
-- 判卷读物体**最终静止位置**（弹落=白放）→ v2 每件放后感知确认，不稳重放；
+v3→v4（2026-09-15 讨论定案 + 离线实验定参，v2-notes §7-19/20/21）：
+- 绑号三路：模板 OCR（8-10px 互混，只作加速）/ VLM 转写放大戳（主路径，
+  R11 验证 5/5）/ 到场结构性绑定（走到已知 oid 跟前所见即该物，免读号）；
+- 基线识别：2560×720 帧 → 戳定位（免模板）→ VLM 转写 → 洪泛色块（像素
+  面积=票权）→ 左面板裁剪自画编号 → 轻量 prompt 五桶分类（思考关直连，
+  实测 0.8~1.0s/帧 vs 旧整帧大 prompt 42~68s 且空文本）；
+- 加权投票：w=clip(sqrt(area/A_ref),0.3,3)；规则推翻门槛加权≥2.0；
+- 三段式：扫描 → 识别 gate（截止线，VLM 全挂按规则开搬=旧下限）→
+  分类锁定 → 纯执行；歧义件（无票/票分裂/规则冲突/other）到场特写
+  确认（move_to_object→感知→中央特写→一票权重 5，走路零额外成本）。
+- 容器 VLM 投票已砍（静态先验+规则已解决，§7-18）；多图一消息实测
+  质量差弃用（§7-21）。
+
+v1~v3 教训存档（2026-09-14 train 实测，temp/p4_tidyroom/ 与 v2-notes §7）：
+- 判卷读物体**最终静止位置**（弹落=白放）→ 每件放后感知确认，不稳重放；
 - 判卷机制（逆向 arena_offline.exe/Nuitka 字符串证实）：
   * 物品在 room_space 内随机撒地面，生成器保证初始全错（放对即重丢）；
   * "放对" = 物体 bbox 中心落入**任一**合法容器 bbox（container_names 是列表，
@@ -50,8 +61,15 @@ from arenaagent.vlm_agent.vlm_agent import VLMAgent, VLMAgentCfg  # noqa: E402
 
 try:
     from cqairace import dashcam as _dashcam
-except Exception:  # noqa: BLE001  cv2/numpy 缺失时降级为存原图
+    from cqairace import stamp_perceive as _sp
+except Exception:  # noqa: BLE001  cv2/numpy 缺失时降级为存原图/旧整帧
     _dashcam = None
+    _sp = None
+try:
+    from cqairace.vlm_direct import DirectVLMClient, DirectVLMUnavailable
+except Exception:  # noqa: BLE001
+    DirectVLMClient = None  # type: ignore[assignment]
+    DirectVLMUnavailable = Exception  # type: ignore[assignment,misc]
 
 TRACE_DIR = _REPO_ROOT / "temp" / "p4_tidyroom"
 SESSIONS_DIR = _REPO_ROOT / "temp" / "p4_tidyroom" / "test_sessions"
@@ -70,6 +88,8 @@ _ENUM_SHOE = os.environ.get("TIDYROOM_ENUM_SHOE", "") not in ("", "0", "false")
 _ENUM_PILLOW = os.environ.get("TIDYROOM_ENUM_PILLOW", "") not in ("", "0", "false")
 # 行车记录仪：感知复合图落盘（事后回放小人第一视角，test 诊断用）
 _SAVE_FRAMES = os.environ.get("TIDYROOM_SAVE_FRAMES", "") not in ("", "0", "false")
+# v4 识别管线开关（=0 回退 v3 旧整帧流水线：A/B 对比与回退开关）
+_V4 = os.environ.get("TIDYROOM_V4", "1") not in ("", "0", "false")
 # 轮次标签：编入本轮目录名（如 test_r4 / train_a；缺省用纯时间戳）
 _RUN_TAG = os.environ.get("TIDYROOM_RUN_TAG", "")
 
@@ -112,13 +132,24 @@ class TidyroomAgent(VLMAgent):
     _FINISH_RESERVE = 30.0   # finish 看门狗预留
     _ITEM_COST = 15.0        # 单件 take+put+确认 预估耗时
     _OP_TIMEOUT = 40.0       # 单次 tongsim 调用超时
-    _VLM_TIMEOUT = 75.0      # 单次 VLM 调用超时（实测大 prompt 推理 68s）
-    _VLM_BUDGET = 160.0      # VLM 收割总上限（与走路重叠，只作上限）
+    _VLM_TIMEOUT = 75.0      # 单次 VLM 调用超时（官方客户端回退路径，实测 68s）
+    _VLM_BUDGET = 160.0      # VLM 收割总上限（回退路径用）
     _MAX_ITEM_DIM = 80.0     # 候选物品最大边（cm）：not pickup 秒拒零成本
     _MIN_DIM = 2.0           # 排除点状 AABB（墙角标记）
     _MAX_BASE_Z = 150.0      # 排除壁挂/吊灯（place_location Z 上限）
     _PAIR_DIST = 50.0        # 鞋成对判定的最大间距（cm，实测一双两脚相距 9~11cm）
     _PAIR_DIM_TOL = 12.0     # 鞋成对判定的尺寸容差（cm）
+
+    # ---- v4 识别管线参数（离线实验定参，v2-notes §7-21）---- #
+    _GATE_BUDGET = 45.0      # 识别 gate 截止线：直连 4帧×2调用并行≈5s，留9倍冗余
+    _DIRECT_TIMEOUT = 45.0   # 直连客户端单次超时（实测 <2s，含网络抖动余量）
+    _W_MIN, _W_MAX = 0.3, 3.0   # 票权上下限：w=clip(sqrt(area/A_ref), .3, 3)
+    _TOP_MARGIN = 1.5        # 歧义判定：top1 < 1.5×次优
+    _OVERTURN_W = 2.0        # VLM 推翻规则的加权门槛（平权时等价旧"≥2 票"）
+    _SINGLE_W = 1.5          # 单帧票直接定案权重（近距大区域特写；回放教训：
+                              # 远距单帧低权票(w≈1.0)定案曾把鞋误判枕）
+    _CONFIRM_W = 5.0         # 到场确认一票的权重（特写=最高清晰度证据）
+    _HI_W, _HI_H = 2560, 720  # 感知请求分辨率（v4 生产：裁剪自标需要更清的左面板）
 
     # 静态容器先验（2026-09-15 决策）：test/train 同一 UE 地图，仅物品随机
     # 撒、容器几何跨轮逐毫米稳定（R9/R10 茶几放点一致；R11 逐帧 AABB 实测，
@@ -169,8 +200,21 @@ class TidyroomAgent(VLMAgent):
         self._vlm_dead = 0                         # 重发后仍失败的帧数（全挂检测）
         self._vlm_seq = 0
         self._vlm_futs_pending_resubmit: list[dict] = []
-        self._item_votes: dict[str, Counter] = {}  # VLM 多帧投票（跨收割累积）
+        self._item_votes: dict[str, Counter] = {}  # VLM 加权投票（跨收割累积）
+        self._item_votes_n: dict[str, Counter] = {}  # 同上，帧计数（防单帧定案）
         self._rule_cats: set[str] = set()          # 规则已分且高置信的物体
+        self._locked = False           # v4：识别 gate 后分类锁定，票不再生效
+        self._ambiguous: set[str] = set()   # 歧义件（到场确认）
+        self._confirms: list[dict] = []     # 到场确认明细（复盘用）
+        self._direct = None              # 直连客户端（思考关），缺 env 时 None
+        if DirectVLMClient is not None:
+            try:
+                self._direct = DirectVLMClient(timeout=self._DIRECT_TIMEOUT)
+                logger.info("VLM 直连客户端就绪 ({} @ {})",
+                            self._direct.model, self._direct.api_base)
+            except DirectVLMUnavailable:
+                logger.warning("VLM 直连未配置（缺 VLM_CLIENT_CFG_API_KEY），"
+                               "回退官方客户端（思考开，慢且偶发空文本）")
         self._vlm_started = 0.0
         self._scan_round = 0
         self._done_oids: set[str] = set()          # 已处理（成功/放弃/拉黑）
@@ -445,6 +489,11 @@ class TidyroomAgent(VLMAgent):
                         "blacklist": sorted(self._blacklist),
                         "categories": self._categories,
                         "placements": self._placements,
+                        # v4：加权票/歧义/到场确认（复盘识别质量用）
+                        "votes": {k: {c: round(w, 2) for c, w in v.items()}
+                                  for k, v in self._item_votes.items()},
+                        "ambiguous": sorted(self._ambiguous, key=int),
+                        "confirms": self._confirms,
                     }, ensure_ascii=False, indent=1), encoding="utf-8")
         except Exception:  # noqa: BLE001
             pass
@@ -454,8 +503,57 @@ class TidyroomAgent(VLMAgent):
     # ------------------------------------------------------------------ #
 
     def _pipeline(self) -> None:
-        self._scan_rounds(max_rounds=1, submit_vlm=True)  # 首轮：边扫边发 VLM
-        # 规则分类先行 → 立即开搬，VLM 结果在搬运间隙收割
+        if _V4:
+            self._pipeline_v4()
+        else:
+            self._pipeline_v3()
+
+    def _pipeline_v4(self) -> None:
+        """三段式：扫描 → 识别 gate（截止线）→ 锁定 → 纯执行 + 歧义到场确认。
+
+        治三病（v2-notes §7-20）：VLM 读小号绑错 oid（裁剪自标根治）、
+        远景近视（特写+像素面积票权）、放错不可逆（锁定后执行零 VLM 依赖，
+        歧义件在拿起前到场确认）。VLM 全挂时 gate 超时按规则开搬 = v3 下限。
+        """
+        self._scan_rounds(max_rounds=1, submit_vlm=True)
+        self._apply_rule_categories()
+        # 识别 gate：收割至全部帧完成/死亡或截止线
+        deadline = time.time() + self._GATE_BUDGET
+        while self._vlm_futs and time.time() < deadline:
+            self._harvest_vlm(block=True,
+                              timeout=max(0.5, deadline - time.time()))
+        self._harvest_vlm(block=False)
+        if self._vlm_futs:  # 截止线到：弃余票，按现有信息锁定
+            logger.warning("识别 gate 截止（{}s），放弃 {} 个在途帧",
+                           self._GATE_BUDGET, len(self._vlm_futs))
+            self._vlm_futs = []
+        self._finalize_recognition()
+        self._rebuild_queue()
+
+        while True:
+            remain = self._TOTAL_BUDGET - (time.time() - self._t0)
+            if remain < self._FINISH_RESERVE:
+                logger.warning("预算剩余 {:.0f}s 触发看门狗，收工", remain)
+                break
+            if self._queue:
+                if remain < self._FINISH_RESERVE + self._ITEM_COST:
+                    logger.warning("预算剩余 {:.0f}s 不足一件，收工", remain)
+                    break
+                self._execute_one()
+                continue
+            # 队列空：二轮扫描死角兜底（不发 VLM；新候选按规则+到场确认）
+            if self._scan_round < self._SCAN_ROUNDS:
+                logger.info("队列空，触发第 {} 轮扫描", self._scan_round + 1)
+                self._scan_rounds(max_rounds=self._SCAN_ROUNDS, submit_vlm=False)
+                self._apply_rule_categories()
+                self._finalize_recognition()
+                self._rebuild_queue()
+                continue
+            break
+
+    def _pipeline_v3(self) -> None:
+        """v3 旧流水线（TIDYROOM_V4=0 回退用）：规则先搬 + VLM 异步插队。"""
+        self._scan_rounds(max_rounds=1, submit_vlm=True)
         self._apply_rule_categories()
         self._rebuild_queue()
 
@@ -474,8 +572,6 @@ class TidyroomAgent(VLMAgent):
                 self._execute_one()
                 continue
 
-            # 队列空：等 VLM 新结果（仅当还有未处理的可搬候选——全处理完
-            # 时 VLM 无增量可贡献，等待纯属烧时间分，R8 实测拖尾 3'50"）
             if self._vlm_futs and self._scan_round < self._SCAN_ROUNDS \
                     and not self._all_candidates_done():
                 self._harvest_vlm(block=True, timeout=10.0)
@@ -486,7 +582,6 @@ class TidyroomAgent(VLMAgent):
                 self._apply_rule_categories()
                 self._rebuild_queue()
                 continue
-            # 二轮扫描后不再等 VLM（实测新物体为 0，期望收益≈0，白耗时间分）
             self._harvest_vlm(block=False)
             break
 
@@ -560,21 +655,16 @@ class TidyroomAgent(VLMAgent):
             self._scan_round += 1
             new = 0
             for i in range(self._SCAN_TURNS):
+                # v4 生产即请求全分辨率（裁剪自标需要更清的左面板；数字
+                # 戳固定 8-10px 不随分辨率放大，§7-17）；v3 模式维持 1280
+                w, h = (self._HI_W, self._HI_H) if (_V4 and _sp is not None) \
+                    else (1280, 720)
                 p = self._call_with_timeout(
                     self.tongsim.acquire_first_person_perception, self.character_id,
-                    1280, 720, default={},
+                    w, h, default={},
                 )
                 objects = p.get("objects", []) or []
                 img = p.get("image", "")
-                if _SAVE_FRAMES and objects and img:
-                    # 行车记录仪专用全分辨率帧（原生 2560x720，数字编号
-                    # 约 2 倍大，OCR/人工复盘都更可靠）；生产路径不受影响
-                    hi = self._call_with_timeout(
-                        self.tongsim.acquire_first_person_perception,
-                        self.character_id, 2560, 720, default={},
-                    )
-                    if hi.get("image"):
-                        img = hi["image"]
                 self._save_frame(f"scan_r{self._scan_round}_{i}", img, objects)
                 for obj in objects:
                     oid = str(obj.get("object_id", ""))
@@ -599,13 +689,65 @@ class TidyroomAgent(VLMAgent):
             self._vlm_started = time.time()
         self._vlm_seq += 1
         seq = self._vlm_seq
-        self._vlm_frames[seq] = {"image": image_b64, "objects": objects}
-        self._vlm_futs.append((seq, self._vlm_pool.submit(self._vlm_classify_frame,
-                                                          self._vlm_frames[seq])))
+        frame = {"image": image_b64, "objects": objects}
+        self._vlm_frames[seq] = frame
+        fn = self._vlm_classify_v4 if (_V4 and _sp is not None) \
+            else self._vlm_classify_frame
+        self._vlm_futs.append((seq, self._vlm_pool.submit(fn, frame)))
 
     # ------------------------------------------------------------------ #
     # VLM 分类与收割
     # ------------------------------------------------------------------ #
+
+    def _direct_invoke(self, content_parts: list[dict]) -> str:
+        """v4 感知调用通道：直连（思考关）优先，官方客户端回退。"""
+        if self._direct is not None:
+            return self._direct.invoke(content_parts, max_tokens=1024,
+                                       timeout=self._DIRECT_TIMEOUT)
+        resp = self.vlm_client.invoke(
+            [{"role": "user", "content": content_parts}])
+        return getattr(resp, "text", "") or ""
+
+    def _frame_candidates(self, objects: list[dict]) -> dict[str, dict]:
+        """当前帧的可搬候选（供 stamp_perceive 绑号过滤与元数据行）。"""
+        wanted: dict[str, dict] = {}
+        for o in objects:
+            oid = str(o.get("object_id", ""))
+            if not oid or self._is_point(o) or self._too_high(o):
+                continue
+            dx, dy, dz = self._dims(o)
+            if not (self._MIN_DIM <= min(dx, dy, dz)
+                    and max(dx, dy, dz) <= self._MAX_ITEM_DIM):
+                continue
+            wanted[oid] = {"color": o.get("color"), "shape": o.get("shape"),
+                           "size": f"{round(dx)}x{round(dy)}x{round(dz)}"}
+        return wanted
+
+    def _vlm_classify_v4(self, frame: dict) -> dict:
+        """v4 单帧识别：戳定位→转写→洪泛→裁剪自标→轻量分类。
+
+        返回统一形态 {"items": {oid: {"cat", "area"}}, "conts": {}}。
+        读号链失败（无戳/转写空/无命中）回退旧整帧 prompt（直连思考关，
+        ~1s/次；官方客户端仅直连不可用时兜底——它思考开 42~68s 且
+        reasoning 吃满 token 正文为空，train_v4 首轮实机教训）。
+        """
+        diag: dict = {}
+        try:
+            wanted = self._frame_candidates(frame["objects"])
+            if wanted:
+                res = _sp.analyze_frame(
+                    base64.b64decode(frame["image"]), wanted,
+                    self._direct_invoke, diag)
+                if res:
+                    return {"items": res, "conts": {}}
+        except Exception as exc:  # noqa: BLE001 读号链任何异常 → 整帧回退
+            logger.warning("v4 读号链异常，回退整帧: {} {}", type(exc).__name__, exc)
+        if diag:
+            logger.warning("v4 读号链空结果 diag={}（{} 候选），回退整帧",
+                           diag, len(self._frame_candidates(frame["objects"])))
+        items, conts = self._vlm_classify_frame(frame)
+        return {"items": {oid: {"cat": cat, "area": 0} for oid, cat in items.items()},
+                "conts": conts}
 
     def _vlm_classify_frame(self, frame: dict) -> tuple[dict[str, str], dict[str, str]]:
         """单帧 VLM 标注，返回 (物品类别, 容器类型)。失败返回空 dict。"""
@@ -657,13 +799,19 @@ class TidyroomAgent(VLMAgent):
             # 直接裸调 invoke（本函数已跑在 _vlm_pool 线程，挂死由外层
             # future.result 超时兜底）；不走 _pool——那 2 个 worker 是留给
             # 主线程 tongsim 调用的，被 VLM 长占会导致转身/感知排队超时。
+            # 直连优先（思考关 ~1s）：官方客户端思考开 42~68s 且偶发
+            # reasoning 吃满 token 正文为空（train_v4 首轮实机教训）。
             try:
-                resp = self.vlm_client.invoke(messages)
+                if self._direct is not None:
+                    text = self._direct.invoke(messages[0]["content"],
+                                               max_tokens=2048)
+                else:
+                    resp = self.vlm_client.invoke(messages)
+                    text = getattr(resp, "text", "") or ""
             except Exception as exc:  # noqa: BLE001
                 logger.warning("VLM invoke 异常(第{}次): {} {}", attempt + 1,
                                type(exc).__name__, exc)
                 continue
-            text = getattr(resp, "text", "") or ""
             if not text.strip():
                 logger.warning("VLM 空文本（第 {} 次），重试", attempt + 1)
                 continue
@@ -695,13 +843,26 @@ class TidyroomAgent(VLMAgent):
                     out[key] = cat
         return out
 
-    def _harvest_vlm(self, block: bool, timeout: float = 0.0) -> bool:
-        """收割 VLM future：结果合并 / 失败换帧重发一次 / 全挂则清空不再等。
+    @classmethod
+    def _vote_weight(cls, area: int, areas: list[int]) -> float:
+        """像素面积票权：w=clip(sqrt(area/A_ref),0.3,3)，A_ref=帧内中位数。
 
-        VLM 可用性强化（2026-09-15）：deepseek 间歇全挂（test R1/R3 整轮
-        零贡献）——失败帧换另一帧重发（同请求重试已证明无效），重发仍
-        失败计入 dead；全部帧 dead 时清空 futures，主循环立即转二轮扫描
-        收尾，不再空等烧时间分。
+        面积 ∝ 视觉清晰度（近大远小），洪泛失败(area=0)回退平权 1.0——
+        v3 回退路径（无区域数据）全为 1.0，与旧裸计数语义一致。
+        """
+        if area <= 0:
+            return 1.0
+        ref = sorted(areas)[len(areas) // 2] if areas else area
+        if ref <= 0:
+            return 1.0
+        return min(max((area / ref) ** 0.5, cls._W_MIN), cls._W_MAX)
+
+    def _harvest_vlm(self, block: bool, timeout: float = 0.0) -> bool:
+        """收割 VLM future：加权投票合并 / 失败换帧重发一次 / 全挂放弃等。
+
+        v4（v2-notes §7-20/21）：future 结果为 {"items": {oid: {cat,area}},
+        "conts": {...}}，票权=像素面积权重；锁定后(_locked)票不再生效。
+        deepseek 直连（思考关）无空文本失败类，换帧重发只是网络抖动兜底。
         """
         if not self._vlm_futs:
             return False
@@ -711,7 +872,7 @@ class TidyroomAgent(VLMAgent):
         for seq, fut in self._vlm_futs:
             try:
                 if not fut.done():
-                    if not (block and not waited):
+                    if not (block and not waited) or self._locked:
                         pending.append((seq, fut))
                         continue
                     waited = True
@@ -719,15 +880,17 @@ class TidyroomAgent(VLMAgent):
                     if budget <= 0:
                         pending.append((seq, fut))
                         continue
-                    items, conts = fut.result(timeout=min(timeout, max(budget, 1.0)))
+                    res = fut.result(timeout=min(timeout, max(budget, 1.0)))
                 else:
-                    items, conts = fut.result(timeout=0.1)
+                    res = fut.result(timeout=0.1)
             except FuturesTimeout:
                 pending.append((seq, fut))
                 continue
             except Exception as exc:  # noqa: BLE001
                 logger.warning("VLM 帧异常: {} {}", type(exc).__name__, exc)
-                items, conts = {}, {}
+                res = None
+            items = (res or {}).get("items") or {}
+            conts = (res or {}).get("conts") or {}
             if not items and not conts:
                 # 空结果 = 挂帧：未重发过的换帧重发一次；重发过则计 dead
                 if seq not in self._vlm_retried:
@@ -740,21 +903,26 @@ class TidyroomAgent(VLMAgent):
                     self._vlm_dead += 1
                     logger.warning("VLM 帧 {} 重发仍失败 (dead={})", seq, self._vlm_dead)
                 continue
-            for oid, cat in items.items():
-                if oid in self._done_oids or cat in ("other", "worn"):
+            if self._locked:
+                continue  # 锁定后到票丢弃（执行阶段零 VLM 依赖）
+            areas = [v.get("area", 0) for v in items.values()]
+            for oid, info in items.items():
+                cat = info.get("cat")
+                if not cat or oid in self._done_oids or cat in ("other", "worn"):
                     continue
                 if self._world.get(oid) is None:
                     continue
-                self._item_votes.setdefault(oid, Counter())[cat] += 1
-                # 校准结论（2026-09-14 压测）：flash 单帧准确率 87.5%，
-                # 错分靠多帧投票压制；规则对 cylinder/round/irregular/
-                # boot 等特征已证明可靠——VLM 单票不得推翻规则，
-                # ≥2 票才允许覆盖（防"单帧错分→容器放错"）。
-                if oid in self._rule_cats and self._item_votes[oid][cat] < 2:
-                    continue
-                if self._categories.get(oid) != cat:
-                    self._categories[oid] = cat
-                    changed = True
+                w = self._vote_weight(int(info.get("area", 0)), areas)
+                self._item_votes.setdefault(oid, Counter())[cat] += w
+                self._item_votes_n.setdefault(oid, Counter())[cat] += 1
+                # 非规则物体：当前加权 top 即时生效（gate 期）；规则物体的
+                # 推翻判定收敛到 _finalize_recognition（加权≥2.0 且领先
+                # 次优 1.5×，平权时等价旧"≥2 票"防单帧错分）
+                if oid not in self._rule_cats:
+                    top = self._weighted_top(oid)
+                    if top and self._categories.get(oid) != top[0]:
+                        self._categories[oid] = top[0]
+                        changed = True
             for oid, ctype in conts.items():
                 if self._world.get(oid) is not None:
                     self._container_votes.setdefault(oid, Counter())[ctype] += 1
@@ -775,6 +943,71 @@ class TidyroomAgent(VLMAgent):
             self._resolve_containers()
             self._rebuild_queue()
         return changed
+
+    def _weighted_top(self, oid: str) -> tuple[str, float, float] | None:
+        """加权票 top1：返回 (cat, w_top, w_second)，无票返回 None。"""
+        c = self._item_votes.get(oid)
+        if not c:
+            return None
+        top2 = c.most_common(2)
+        cat, w1 = top2[0]
+        w2 = top2[1][1] if len(top2) > 1 else 0.0
+        return cat, float(w1), float(w2)
+
+    def _finalize_recognition(self) -> None:
+        """识别 gate 收口：规则×加权票合流定类，标记歧义件，锁定分类。
+
+        歧义（到场确认）：无票且无规则 / top1<1.5×次优 / top=other /
+        VLM 与规则冲突但未达推翻门槛。锁定后 _harvest_vlm 弃票。
+        """
+        cont_oids = {str(c.get("object_id")) for c in self._containers.values()}
+        for oid, obj in self._world.items():
+            if oid in self._done_oids or self._is_point(obj) or self._too_high(obj):
+                continue
+            if oid in cont_oids:
+                continue  # 已解析容器本体（垃圾桶等尺寸可过物品筛选）不参与定类
+            d = self._dims(obj)
+            if not (self._MIN_DIM <= min(d) and max(d) <= self._MAX_ITEM_DIM):
+                continue
+            if oid in self._categories and oid not in self._item_votes \
+                    and oid not in self._rule_cats:
+                continue  # 成对启发等已定且无 VLM 票挑战
+            rule_cat = self._categories.get(oid) if oid in self._rule_cats else None
+            top = self._weighted_top(oid)
+            if top is None:
+                if rule_cat is None:
+                    self._ambiguous.add(oid)  # 无票无规则 → 到场确认
+                continue
+            cat, w1, w2 = top
+            if cat == "other":
+                self._ambiguous.add(oid)
+                continue
+            if rule_cat is not None:
+                if cat != rule_cat and w1 >= self._OVERTURN_W \
+                        and (w2 == 0 or w1 >= self._TOP_MARGIN * w2):
+                    logger.info("VLM 推翻规则: {} {} → {} (w={:.1f})",
+                                oid, rule_cat, cat, w1)
+                    self._categories[oid] = cat
+                    self._rule_cats.discard(oid)
+                elif cat != rule_cat:
+                    self._ambiguous.add(oid)  # 冲突未达门槛 → 到场确认
+                continue
+            # 纯 VLM 票：票分裂、或单帧低权票不足定案 → 歧义
+            n_top = self._item_votes_n.get(oid, Counter()).get(cat, 0)
+            if w2 > 0 and w1 < self._TOP_MARGIN * w2:
+                self._ambiguous.add(oid)
+            elif n_top >= 2 or w1 >= self._SINGLE_W:
+                if self._categories.get(oid) != cat:
+                    self._categories[oid] = cat
+            else:
+                self._ambiguous.add(oid)
+        self._locked = True
+        amb = sorted(self._ambiguous, key=int)
+        if amb:
+            logger.info("识别锁定: 歧义件 {}（到场确认）", amb)
+        self._trace("recognition_locked",
+                    votes={k: dict(v) for k, v in self._item_votes.items()},
+                    ambiguous=amb)
 
     def _pair_shoes(self) -> None:
         """鞋成对启发：紧邻确定鞋（<50cm）且尺寸相近（±12cm）的可搬物体，
@@ -849,6 +1082,13 @@ class TidyroomAgent(VLMAgent):
             return "trash"
         if shape == "round":
             return "food"
+        # shape 覆盖缺口补齐（§7-18：R11 的 36 号黑枕 shape=pillow 无分支，
+        # VLM 全挂轮漏分类）：pillow 直判；小件非黑 box 按包装盒判 trash
+        # （黑色 box 排除——垃圾桶本体即 black box，防止自搬自）
+        if shape == "pillow":
+            return "pillow"
+        if shape == "box" and color != "black" and max(self._dims(obj)) <= 45:
+            return "trash"
         if shape == "rectangle" and color in ("beige", "white") \
                 and max(self._dims(obj)) < self._MAX_ITEM_DIM:
             return "pillow"
@@ -1018,27 +1258,44 @@ class TidyroomAgent(VLMAgent):
 
     def _rebuild_queue(self) -> None:
         self._pair_shoes()  # 鞋成对启发（2026-09-15 R4：圆状鞋 33 被误判 food 的修正）
+        # 歧义件并入（保留先验类别作到场确认失败的回退），不重复入队
+        merged: dict[str, str | None] = dict(self._categories)
+        for oid in self._ambiguous:
+            merged[oid] = self._categories.get(oid)
         queue: list[dict] = []
-        for oid, cat in self._categories.items():
+        for oid, cat in merged.items():
             if oid in self._done_oids:
                 continue
             if _ONLY_OIDS and oid not in _ONLY_OIDS:
                 continue
             obj = self._world.get(oid)
-            cont_key = _CAT_TO_CONTAINER.get(cat)
-            cont = self._containers.get(cont_key) if cont_key else None
-            if obj is None or cont is None:
+            if obj is None:
                 continue
             dx, dy, dz = self._dims(obj)
             if max(dx, dy, dz) > self._MAX_ITEM_DIM or min(dx, dy, dz) < self._MIN_DIM:
                 continue
-            if self._on_target(obj, cont):
-                continue
-            put, put_retry = self._put_points(cont, cont_key)
+            confirm = oid in self._ambiguous
+            if not confirm and cat is None:
+                continue  # 非歧义但无类别（不该出现，保险）
+            cont_key = _CAT_TO_CONTAINER.get(cat) if cat else None
+            if not confirm:
+                cont = self._containers.get(cont_key) if cont_key else None
+                if cont is None:
+                    continue
+                if self._on_target(obj, cont):
+                    continue
+            else:
+                # 歧义件即使疑似在位也要到场看一眼（可能是错的容器）
+                cont = self._containers.get(cont_key) if cont_key else None
+            put, put_retry = (self._put_points(cont, cont_key)
+                              if cont is not None else ({}, {}))
             queue.append({"oid": oid, "cat": cat, "cont_key": cont_key,
                           "put": put, "put_retry": put_retry,
-                          "move": self._move_point(put)})
-        queue.sort(key=lambda t: (_CAT_ORDER.get(t["cat"], 9), t["oid"]))
+                          "move": self._move_point(put) if put else None,
+                          "confirm": confirm})
+        # 歧义件排最后：先搬已锁定的确定件，歧义件在执行中到场确认
+        queue.sort(key=lambda t: (t["confirm"],
+                                  _CAT_ORDER.get(t["cat"], 9), t["oid"]))
         self._queue = queue
 
     # ------------------------------------------------------------------ #
@@ -1049,6 +1306,41 @@ class TidyroomAgent(VLMAgent):
         task = self._queue.pop(0)
         oid = task["oid"]
         t1 = time.time()
+
+        # 歧义件到场确认（v4）：走到跟前→感知→中央特写→一票定乾坤。
+        # 绑号结构性成立（move_to_object 的目标就是该 oid），免读号。
+        if task.get("confirm"):
+            cat = self._confirm_on_arrival(oid, t1)
+            if cat == "on_target":
+                logger.info("歧义 {} 已在匹配容器上，跳过搬运", oid)
+                self._done_oids.add(oid)
+                self._trace("on_target_skip", oid=oid)
+                return
+            if cat:
+                task["cat"] = cat
+                task["cont_key"] = _CAT_TO_CONTAINER.get(cat)
+                cont = self._containers.get(task["cont_key"] or "")
+                if cont is None:
+                    logger.info("歧义 {} 确认为 {} 但无容器，跳过", oid, cat)
+                    self._done_oids.add(oid)
+                    return
+                task["put"], task["put_retry"] = self._put_points(cont, task["cont_key"])
+                task["move"] = self._move_point(task["put"])
+                obj = self._world.get(oid)
+                if obj is not None and self._on_target(obj, cont):
+                    logger.info("歧义 {} 确认 {} 且已在容器上，跳过", oid, cat)
+                    self._done_oids.add(oid)
+                    self._trace("on_target_skip", oid=oid, cat=cat)
+                    return
+            elif task.get("cat") is None:
+                # 确认失败且无任何先验类别：放弃（盲放比不放差——放错扣完成度）
+                logger.info("歧义 {} 到场确认失败且无先验，放弃", oid)
+                self._done_oids.add(oid)
+                self._gave_up += 1
+                self._gave_up_oids.add(oid)
+                self._trace("confirm_giveup", oid=oid)
+                return
+            # 确认失败但有先验类别 → 按先验继续搬
 
         take = self._call_with_timeout(
             self.tongsim.move_and_take_object, self.character_id, oid,
@@ -1081,6 +1373,70 @@ class TidyroomAgent(VLMAgent):
             self._gave_up_oids.add(oid)
             logger.warning("件放弃 {} ({})", oid, task["cont_key"])
             self._trace("gave_up", oid=oid, cat=task["cat"], cont=task["cont_key"])
+
+    def _confirm_on_arrival(self, oid: str, t0: float) -> str | None:
+        """歧义件到场确认：move_to_object → 感知 → 左面板中央特写 → prompt C。
+
+        一票权重 _CONFIRM_W（特写=最高清晰度证据）合并进加权票后取 top；
+        失败返回 None（调用方按先验类别/放弃处理）。已在正确容器上则
+        返回 "on_target" 哨兵由调用方跳过搬运。
+        """
+        try:
+            self._call_with_timeout(self.tongsim.move_to_object,
+                                    self.character_id, oid, default=None)
+            p = self._call_with_timeout(
+                self.tongsim.acquire_first_person_perception, self.character_id,
+                self._HI_W, self._HI_H, default={},
+            )
+            img_b64 = p.get("image", "")
+            if _SAVE_FRAMES and img_b64:
+                self._save_frame(f"confirm_cls_{oid}", img_b64,
+                                 p.get("objects", []) or [])
+            if not img_b64 or _sp is None:
+                return None
+            obj = next((o for o in p.get("objects", []) or []
+                        if str(o.get("object_id", "")) == oid), None)
+            if obj is not None:  # 已在目标容器上则不必问也不必搬
+                for ck, cont in self._containers.items():
+                    if self._on_target(obj, cont) and \
+                            _CAT_TO_CONTAINER.get(self._best_guess(oid)) == ck:
+                        return "on_target"
+            crop = _sp.confirm_image(base64.b64decode(img_b64), oid)
+            if crop is None:
+                return None
+            meta = self._frame_candidates(p.get("objects", []) or []).get(oid) \
+                or {"color": "Unknown", "shape": "Unknown", "size": "?"}
+            prompt = _sp.PROMPT_CONFIRM_TMPL.format(
+                oid=oid, color=meta["color"], shape=meta["shape"],
+                size=meta["size"])
+            parts = [{"type": "image_url",
+                      "image_url": {"url": "data:image/jpeg;base64,"
+                                    + base64.b64encode(crop).decode()}},
+                     {"type": "text", "text": prompt}]
+            cat = _sp.parse_classification(self._direct_invoke(parts)).get(oid)
+            sec = round(time.time() - t0, 1)
+            if cat and cat != "other":
+                self._item_votes.setdefault(oid, Counter())[cat] += self._CONFIRM_W
+                self._item_votes_n.setdefault(oid, Counter())[cat] += 1
+                top = self._weighted_top(oid)
+                final = top[0] if top else cat
+                self._categories[oid] = final
+                self._ambiguous.discard(oid)
+                self._confirms.append({"oid": oid, "cat": final, "sec": sec})
+                logger.info("到场确认 {} → {} ({:.1f}s)", oid, final, sec)
+                self._trace("confirm", oid=oid, cat=final, sec=sec)
+                return final
+            self._confirms.append({"oid": oid, "cat": None, "sec": sec})
+            logger.info("到场确认 {} 无结论 ({:.1f}s)", oid, sec)
+            return None
+        except Exception as exc:  # noqa: BLE001 确认链异常不影响搬运主流程
+            logger.warning("到场确认 {} 异常: {} {}", oid, type(exc).__name__, exc)
+            return None
+
+    def _best_guess(self, oid: str) -> str:
+        """当前最佳类别（加权 top 或已有分类），无则空串。"""
+        top = self._weighted_top(oid)
+        return self._categories.get(oid) or (top[0] if top else "")
 
     def _put_with_retry(self, task: dict) -> bool:
         """放置链 v3（实机观察修正，2026-09-14 run11）：
